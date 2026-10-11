@@ -4,6 +4,8 @@
 [![DSH supported through 0.2.0-rc.2](https://img.shields.io/badge/DSH-up%20to%200.2.0--rc.2-2563eb.svg)](#环境要求)
 [![Node](https://img.shields.io/badge/node-%5E22.19%20%7C%7C%20%3E%3D24-339933.svg)](#环境要求)
 
+**简体中文** | [English](README.en.md)
+
 给 DeepSeek Harness（DSH）**设置**里补上三个可视化菜单，把三件平时只能手改文件的事变成点选操作：
 
 | 设置菜单 | 管什么 | 背后落盘位置 |

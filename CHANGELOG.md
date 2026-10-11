@@ -3,6 +3,17 @@
 本文件的格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.1.1] - 2026-10-11
+
+### 新增
+- 英文文档 `README.en.md`，中英文 README 顶部互相切换链接。
+
+### 修复
+- peer 依赖范围带上显式预发布分支（`>=0.1.2-rc.1 <0.2.0-0 || >=0.2.0-rc.1 <0.3.0-0`，
+  cordis 同理）。原写法 `>=0.1.2-rc.1 <0.3.0` 在**默认 semver 规则**下不匹配 `0.2.0-rc.2`
+  这类预发布版本（预发布版本只被同 `major.minor.patch` 的带预发布比较器命中），会误导消费方与
+  插件市场校验。
+
 ## [0.1.0] - 2026-10-11
 
 首个公开版本。
@@ -23,4 +34,5 @@
 - 仅支持全局作用域（`settings.section` 是 root scope 槽位），项目级技能与项目级 `AGENTS.md`
   需在会话内界面操作。
 
+[0.1.1]: https://github.com/2384418321/dsh-integration-settings/releases/tag/v0.1.1
 [0.1.0]: https://github.com/2384418321/dsh-integration-settings/releases/tag/v0.1.0

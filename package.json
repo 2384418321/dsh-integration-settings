@@ -1,6 +1,6 @@
 {
   "name": "dsh-integration-settings",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "集成插件：在 DSH 设置中加入「MCP 管理 / Skill 管理 / 全局人设」三个可视化页面",
   "license": "MIT",
@@ -32,6 +32,7 @@
     "lib",
     "cordis.patch.yml",
     "README.md",
+    "README.en.md",
     "CHANGELOG.md",
     "LICENSE"
   ],
@@ -49,11 +50,11 @@
     "yaml": "^2.6.1"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": ">=4.0.1 <5",
-    "@deepseek-ai/dsh-client-locale": ">=0.1.2-rc.1 <0.3.0",
-    "@deepseek-ai/dsh-client-ui-slots": ">=0.1.2-rc.1 <0.3.0",
-    "@deepseek-ai/dsh-host-webserver": ">=0.1.2-rc.1 <0.3.0",
-    "@deepseek-ai/dsh-web-app": ">=0.1.2-rc.1 <0.3.0",
+    "@deepseek-ai/cordis": ">=4.0.1 <4.1.0-0 || >=4.1.0-rc.1 <5",
+    "@deepseek-ai/dsh-client-locale": ">=0.1.2-rc.1 <0.2.0-0 || >=0.2.0-rc.1 <0.3.0-0",
+    "@deepseek-ai/dsh-client-ui-slots": ">=0.1.2-rc.1 <0.2.0-0 || >=0.2.0-rc.1 <0.3.0-0",
+    "@deepseek-ai/dsh-host-webserver": ">=0.1.2-rc.1 <0.2.0-0 || >=0.2.0-rc.1 <0.3.0-0",
+    "@deepseek-ai/dsh-web-app": ">=0.1.2-rc.1 <0.2.0-0 || >=0.2.0-rc.1 <0.3.0-0",
     "react": "^18.2.0"
   },
   "peerDependenciesMeta": {
