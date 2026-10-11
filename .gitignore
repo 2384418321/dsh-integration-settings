@@ -1,0 +1,15 @@
+# 依赖
+node_modules/
+
+# 插件运行时状态（MCP 真理源 json、临时文件等；属于使用者本机数据，不入库）
+.dsh-integration/
+
+# 日志与调试产物
+*.log
+pnpm-debug.log*
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

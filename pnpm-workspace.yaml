@@ -1,0 +1,4 @@
+# pnpm 构建脚本白名单：只有列在这里的依赖允许执行安装期脚本。
+allowBuilds:
+  esbuild: true
+  koffi: true
