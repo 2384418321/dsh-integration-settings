@@ -6,14 +6,14 @@
 
 **简体中文** | [English](README.en.md)
 
-给 DeepSeek Harness（DSH）**设置**里补上四个可视化菜单，把四件平时只能手改文件的事变成点选操作：
+给 DeepSeek Harness（DSH）**设置**里补上四个可视化菜单。主打**一键解锁思考模式**——自动识别每个 OpenAI 兼容网关真正支持的思考档位，写进模型选择器；另外三个菜单把平时只能手改文件的事变成点选操作：
 
 | 设置菜单 | 管什么 | 背后落盘位置 |
 | --- | --- | --- |
 | **MCP 管理** | 增 / 删 / 改 / 启停 MCP 服务器 | 当前 profile 的 `cordis.patch.yml`（受管区块）+ `.dsh-integration/mcp.json`（真理源） |
 | **Skill 管理** | 浏览 / 新建 / 编辑 / 删除技能 | DSH 全局、共享 `.agents`、Claude / Codex 全局目录，以及当前项目的 `.dsh` / `.agents` / `.claude` 目录 |
 | **全局人设** | 可视化编辑人设文件（等价于 Claude Code 的 `CLAUDE.md`） | `$DSH_HOME/AGENTS.md`（全局）与 `<项目>/AGENTS.md`（当前项目） |
-| **模型供应商** | 新增 / 编辑 / 删除 OpenAI 兼容网关，自动拉模型列表与思考档位 | 当前 profile 的 `cordis.patch.yml`（`llm-pi-ai` 条目的 `config.providers`）+ `$DSH_HOME/.credentials.yaml`（`refs`，只存密钥） |
+| **思考解锁** | 打开即自动识别每个网关支持的思考档位，一键解锁；兼新增 / 编辑 / 删除 OpenAI 兼容网关与拉取模型列表 | 当前 profile 的 `cordis.patch.yml`（`llm-pi-ai` 条目的 `config.providers`）+ `$DSH_HOME/.credentials.yaml`（`refs`，只存密钥） |
 
 > 这是社区插件，不是 DeepSeek 官方产品。安装前请自行评估，建议先备份 profile 目录。
 
@@ -97,7 +97,7 @@ DSH="/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh"
 
 | 现象 | 原因 / 处理 |
 | --- | --- |
-| 装完了，设置里没有这三个菜单 | ① 确认 `list` 与 profile `package.json` 的 `dsh.profile.bundles` 里有本包名；② 确认重启的是**同一个** profile；③ 若 bundle 加载失败，DSH 启动时会往 stderr 打 `<bin>: skipping profile bundle "dsh-integration-settings": <原因>` 并静默跳过——常见原因是改了 `src/` 没重新构建（`lib/` 缺失）、Node 版本过低或依赖解析失败 |
+| 装完了，设置里没有这四个菜单 | ① 确认 `list` 与 profile `package.json` 的 `dsh.profile.bundles` 里有本包名；② 确认重启的是**同一个** profile；③ 若 bundle 加载失败，DSH 启动时会往 stderr 打 `<bin>: skipping profile bundle "dsh-integration-settings": <原因>` 并静默跳过——常见原因是改了 `src/` 没重新构建（`lib/` 缺失）、Node 版本过低或依赖解析失败 |
 | 点进菜单一片空白 | `settings.section` 是 root scope 槽位，一旦在条目里调用 seat 上的 session hook（`usePanelInfo` 等）就会触发 `Minified React error #311`，shell 会把整个槽位替换成 `<div data-slot-error="settings.section"></div>`。改客户端代码时请守「root scope 条目不调用任何 seat hook」这条（见下方设计要点） |
 | MCP 改了不生效 | profile patch 由 loader **启动时**读取：重启 DSH 后生效（页面上也有提示）。技能、人设改动即时生效 |
 | 写操作报 403 / 415 | 宿主路由要求写请求带 `x-dsh-integration: 1` 与 `application/json`；非 loopback / 不可信 Host、`Origin` 与 `Host` 不一致、`Sec-Fetch-Site: cross-site` 一律 403 |
@@ -175,12 +175,27 @@ DSH 的 `@deepseek-ai/dsh-agent-instructions` 插件会在每个会话的首个�
 以及 `AGENTS.local.md`/`CLAUDE.local.md`）。本页就是这份全局文件的编辑器，并列出最近 3 份备份
 供一键载回。
 
-### 模型供应商
+### 思考解锁（兼模型供应商管理）
 DSH 的模型供应商由 `@deepseek-ai/dsh-llm-pi-ai` 的 `config.providers` 决定，写在各 profile 的
-`cordis.patch.yml` 里。本页把这件事变成表单：填 `id / baseURL / apiKeyEnv / apiKey` → 点
-「测试连接并拉取模型」读网关的 `GET /models` → 勾选要暴露的模型 → 保存。
+`cordis.patch.yml` 里。思考档位（`reasoningEfforts`）一旦声明就是**白名单**：没声明的档位在模型
+选择器里就是灰的，所以「这个模型能不能选 High / Max」完全由那几十行 YAML 决定。本页的主职是把这件
+事自动化。
 
-几个关键设计（都不是随意选择）：
+**自动识别 + 一键解锁**
+
+- **打开页面即自动识别**：对每个已配置的网关发一次只读的 `GET /models`，读出
+  `reasoning_supported_efforts` / `can_disable_thinking`，逐模型与当前配置比对。识别阶段
+  **不写任何文件**，页面显示「待解锁 N / 已解锁 M / 网关未声明 K」。
+- **一键解锁**：点「全部解锁」把档位写回 `cordis.patch.yml`，写前自动备份。**网关的能力表是唯一
+  真相**——网关说某模型只支持 `medium`，就只声明 `medium`；你配置里多出来的档位会被去掉。页面在
+  解锁前会把「会减少档位」的模型连 `原档位 → 新档位` 一起列出来。
+- **只解锁这个条目下的网关**：只有 `- id: llm-pi-ai` 的 `config.providers` 里的供应商会被读取和
+  改写。DSH 自带的 `deepseek-official` / `deepseek-account` 不在这个文件里，插件碰不到。
+- **网关没说的模型不动**：网关对某个模型完全没给思考信息时，插件保留你原来的声明，
+  **绝不会替你写成 `reasoningEfforts: false`**（那等于宣称该模型不支持思考）。
+- **一个网关探测失败不影响其它**：失败的那个会单独报错，其余照常解锁。
+
+**表单部分（新增 / 编辑 / 删除网关）**
 
 - **只改进已有的 `- id: llm-pi-ai` 条目**，不新建第二个同名条目——cordis 的同 id 条目会让 DSH
   启动直接失败（去重得用 `dev_fix_patch`）。找不到该条目时页面会黄条提示。
@@ -188,15 +203,13 @@ DSH 的模型供应商由 `@deepseek-ai/dsh-llm-pi-ai` 的 `config.providers` �
   这样文件里的注释和其它条目的内容都原样保留。
 - **密钥不写进 patch**：`apiKeyEnv` 只是引用名，密钥本体写到 `$DSH_HOME/.credentials.yaml` 的
   `refs:` 段。页面上的 apiKey 输入框只在「新增」或「想换密钥」时填，留空就不动既有密钥。
-- **思考档位自动映射**：网关 `GET /models` 返回的 `reasoning_supported_efforts` 会转成 pi-ai 的
-  `reasoningEfforts` 字典。注意 `off` 必须写成带引号的 `"off":`——YAML 1.1 会把裸 `off:` 解析成
-  布尔 `false`，档位字典的键类型就错了。
 - **兼容手写分组**：页面对 `providers:` 下每个供应商只改自己那一段字节，不改动的分组会**逐字节
   原样保留**——手写的流式列表（`input: [ "text", "image" ]`）、带引号的标量、以及
-  `reasoningEfforts: false`（声明「不支持思考」的模型）都不会被重排或丢掉。把某个供应商原样
-  保存回去时文件零变化。注意：`reasoningEfforts` 一旦声明就是白名单，**未声明的档位即不可选**；
-  `false` 表示该模型不支持思考，`{}` 和不写都表示「沿用网关目录里的能力」。
-- 保存/删除都会写 `.bak-<时间戳>` 备份（各保留最近 3 份），两个文件权限都按 `0600` 写。
+  `reasoningEfforts: false`（声明「不支持思考」的模型）都不会被重排或丢掉。把某个供应商原样保存
+  回去时文件零变化。
+- **`"off"` 必须带引号**：YAML 1.1 会把裸 `off:` 解析成布尔 `false`，档位字典的键类型就错了。
+  插件写出的 `off` 一定带引号。
+- 保存 / 解锁 / 删除都会写 `.bak-<时间戳>` 备份（各保留最近 3 份），两个文件权限都按 `0600` 写。
 
 改完需**重启 DSH** 才会在模型选择器里出现；重启前可用 `de_models` 核对每个模型是否带上了
 「思考等级」。

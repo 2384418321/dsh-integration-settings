@@ -22,6 +22,7 @@ import {
   readProviderState,
   saveProvider,
   deleteProvider,
+  unlockProviderThinking,
   probeGateway,
   httpError,
 } from './core.js'
@@ -298,6 +299,8 @@ async function handle(ctx, req, res) {
       return json(res, 200, { ok: true, data: await saveProvider(process.env, body || {}) })
     case 'POST /provider/delete':
       return json(res, 200, { ok: true, data: await deleteProvider(process.env, body || {}) })
+    case 'POST /provider/unlock':
+      return json(res, 200, { ok: true, data: await unlockProviderThinking(process.env, body || {}) })
     default:
       return json(res, 404, { ok: false, code: 'error.proto.notFound', error: `未知接口：${req.method} ${route}` })
   }

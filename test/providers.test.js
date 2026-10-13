@@ -11,12 +11,15 @@ import {
   paths,
   probeGateway,
   readCredentialNames,
+  readCredentialValue,
   readProviderState,
   readProvidersFromPatch,
   removeCredentialRef,
   removeProviderFromPatch,
   renderProviderConfig,
   saveProvider,
+  unlockPlan,
+  unlockProviderThinking,
   validateModel,
 } from '../src/core.js'
 
@@ -488,4 +491,207 @@ test('saveProvider renames a provider without leaving a duplicate key', async (t
   const state = await readProviderState(env)
   assert.deepEqual(state.providers.map((p) => p.id).sort(), ['new-name', 'workbudy'])
   assert.equal(state.providers.find((p) => p.id === 'new-name').baseURL, 'http://h/v2')
+})
+
+/* ------------------------------------------------------- thinking unlock */
+
+const UNLOCK_PATCH = `# profile patch
+- id: llm-pi-ai
+  name: '@deepseek-ai/dsh-llm-pi-ai'
+  config:
+    providers:
+      locked:
+        apiKeyEnv: LOCKED_KEY
+        api: openai-completions
+        baseURL: https://locked.example/v1
+        models:
+          - id: m-reason
+            name: Reasoner
+            contextWindow: 1000000
+            maxTokens: 393216
+            input:
+              - text
+              - image
+          - id: m-plain
+            name: Plain
+            reasoningEfforts: false
+            contextWindow: 128000
+            maxTokens: 8192
+            input:
+              - text
+      quiet:
+        apiKeyEnv: QUIET_KEY
+        baseURL: https://quiet.example/v1
+        models:
+          - id: m-quiet
+            name: Quiet
+            reasoningEfforts:
+              "off":
+              high: high
+            contextWindow: 64000
+            maxTokens: 4096
+            input:
+              - text
+- id: mcp-shared
+  config:
+    servers: []
+`
+
+const UNLOCK_CREDENTIALS = `version: 1
+records:
+  keep-me: untouched
+refs:
+  LOCKED_KEY: sk-locked
+  QUIET_KEY: sk-quiet
+`
+
+const REASON_LEVELS = { off: null, low: 'low', high: 'high', max: 'max' }
+
+function stubFetch(table) {
+  const seen = []
+  const impl = async (url, init) => {
+    seen.push({ url: String(url), authorization: init?.headers?.authorization })
+    return { ok: true, status: 200, json: async () => ({ data: table[String(url)] || [] }) }
+  }
+  impl.seen = seen
+  return impl
+}
+
+async function unlockSandbox(t) {
+  const base = await sandbox(t)
+  await base.fsp.writeFile(base.resolved.patchFile, UNLOCK_PATCH, { mode: 0o600 })
+  await base.fsp.writeFile(base.resolved.credentialsFile, UNLOCK_CREDENTIALS, { mode: 0o600 })
+  return base
+}
+
+test('readCredentialValue reads one ref without disturbing the rest', () => {
+  assert.equal(readCredentialValue(UNLOCK_CREDENTIALS, 'LOCKED_KEY'), 'sk-locked')
+  assert.equal(readCredentialValue(UNLOCK_CREDENTIALS, 'NOPE'), '')
+  assert.equal(readCredentialValue('version: 1\n', 'LOCKED_KEY'), '')
+})
+
+test('unlockPlan unlocks only what the gateway advertises', () => {
+  const configured = [
+    { id: 'a', name: 'A' },
+    { id: 'b', name: 'B', reasoningEfforts: false },
+    { id: 'c', name: 'C', reasoningEfforts: { off: null, low: 'low', high: 'high', max: 'max' } },
+    { id: 'd', name: 'D' },
+    { id: 'e', name: 'E', reasoningEfforts: { off: null, low: 'low', high: 'high', max: 'max' } },
+  ]
+  const gateway = [
+    { id: 'a', reasoningEfforts: REASON_LEVELS, reasoning: 'high' },
+    // silent rows must never be locked down to `false`
+    { id: 'b', name: 'B' },
+    // same declaration, different key order: not a change
+    { id: 'c', reasoningEfforts: { max: 'max', high: 'high', low: 'low', off: null } },
+    // the gateway is the truth: levels it does not accept are dropped, and counted
+    { id: 'e', reasoningEfforts: { medium: 'medium' } },
+  ]
+  const { models, report } = unlockPlan(configured, gateway)
+  assert.deepEqual(models[0].reasoningEfforts, REASON_LEVELS)
+  assert.equal(models[0].reasoning, 'high')
+  assert.equal(models[1].reasoningEfforts, false)
+  assert.deepEqual(models[2].reasoningEfforts, REASON_LEVELS)
+  assert.equal(models[3].reasoningEfforts, undefined)
+  assert.deepEqual(models[4].reasoningEfforts, { medium: 'medium' })
+  assert.deepEqual(
+    { scanned: report.scanned, unlocked: report.unlocked, already: report.already, silent: report.silent, gone: report.gone, narrowed: report.narrowed },
+    { scanned: 5, unlocked: 2, already: 1, silent: 1, gone: 1, narrowed: 1 },
+  )
+  const narrowedRow = report.details.find((d) => d.id === 'e')
+  assert.deepEqual(narrowedRow.from, ['off', 'low', 'high', 'max'])
+  assert.deepEqual(narrowedRow.to, ['medium'])
+  assert.deepEqual(narrowedRow.lost, ['off', 'low', 'high', 'max'])
+  assert.deepEqual(report.details.find((d) => d.id === 'a').lost, [])
+})
+
+test('unlockProviderThinking dry run reports the gap without writing', async (t) => {
+  const { fsp, resolved, env } = await unlockSandbox(t)
+  const before = await fsp.readFile(resolved.patchFile, 'utf8')
+  const fetchImpl = stubFetch({
+    'https://locked.example/v1/models': [
+      { id: 'm-reason', supports_reasoning: true, reasoning_supported_efforts: ['low', 'high', 'max'], can_disable_thinking: true },
+      { id: 'm-plain' },
+    ],
+    'https://quiet.example/v1/models': [
+      { id: 'm-quiet', supports_reasoning: true, reasoning_supported_efforts: ['high'], can_disable_thinking: true },
+    ],
+  })
+  const report = await unlockProviderThinking(env, { dryRun: true, fetchImpl })
+  assert.equal(report.dryRun, true)
+  assert.equal(report.changed, false)
+  assert.equal(report.unlockedModels, 1)
+  assert.deepEqual(report.unlockedProviders, ['locked'])
+  assert.equal(report.providers.find((r) => r.id === 'locked').status, 'pending')
+  assert.equal(report.providers.find((r) => r.id === 'quiet').status, 'current')
+  assert.equal(await fsp.readFile(resolved.patchFile, 'utf8'), before)
+  // the probe authenticated with the ref from .credentials.yaml
+  assert.deepEqual(fetchImpl.seen.map((c) => c.authorization), ['Bearer sk-locked', 'Bearer sk-quiet'])
+})
+
+test('unlockProviderThinking writes levels, keeps silent models and other providers intact', async (t) => {
+  const { fsp, resolved, env } = await unlockSandbox(t)
+  const before = await fsp.readFile(resolved.patchFile, 'utf8')
+  const quietBefore = before.slice(before.indexOf('      quiet:'), before.indexOf('- id: mcp-shared'))
+  const fetchImpl = stubFetch({
+    'https://locked.example/v1/models': [
+      { id: 'm-reason', supports_reasoning: true, reasoning_supported_efforts: ['low', 'high', 'max'], can_disable_thinking: true, reasoning_default_effort: 'high' },
+      { id: 'm-plain' },
+    ],
+    'https://quiet.example/v1/models': [
+      { id: 'm-quiet', supports_reasoning: true, reasoning_supported_efforts: ['high'], can_disable_thinking: true },
+    ],
+  })
+  const report = await unlockProviderThinking(env, { fetchImpl })
+  assert.equal(report.changed, true)
+  assert.equal(report.unlockedModels, 1)
+
+  const after = await fsp.readFile(resolved.patchFile, 'utf8')
+  const parsed = YAML.parse(after)
+  const providers = parsed.find((entry) => entry.id === 'llm-pi-ai').config.providers
+  assert.deepEqual(providers.locked.models[0].reasoningEfforts, REASON_LEVELS)
+  assert.equal(providers.locked.models[0].reasoning, 'high')
+  // a model the gateway says nothing about keeps its explicit declaration
+  assert.equal(providers.locked.models[1].reasoningEfforts, false)
+  // untouched groups stay byte-for-byte identical
+  assert.equal(after.slice(after.indexOf('      quiet:'), after.indexOf('- id: mcp-shared')), quietBefore)
+  assert.equal(YAML.parse(after).find((entry) => entry.id === 'mcp-shared').config.servers.length, 0)
+  // a backup was taken before the write
+  const backups = (await fsp.readdir(resolved.profileDir)).filter((f) => f.includes('cordis.patch.yml.bak'))
+  assert.ok(backups.length >= 1, `expected a backup, got ${backups.join(',')}`)
+
+  // second pass is a no-op: nothing changed, so the file is not rewritten
+  const settled = await unlockProviderThinking(env, { fetchImpl })
+  assert.equal(settled.changed, false)
+  assert.equal(settled.unlockedModels, 0)
+  assert.equal(await fsp.readFile(resolved.patchFile, 'utf8'), after)
+})
+
+test('unlockProviderThinking reports a failing gateway without skipping the others', async (t) => {
+  const { fsp, resolved, env } = await unlockSandbox(t)
+  const fetchImpl = async (url) => {
+    if (String(url).startsWith('https://locked.example')) {
+      throw new Error('ECONNREFUSED')
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ data: [{ id: 'm-quiet', supports_reasoning: true, reasoning_supported_efforts: ['high'], can_disable_thinking: true }] }),
+    }
+  }
+  const report = await unlockProviderThinking(env, { fetchImpl })
+  const locked = report.providers.find((r) => r.id === 'locked')
+  const quiet = report.providers.find((r) => r.id === 'quiet')
+  assert.equal(locked.status, 'error')
+  assert.match(locked.error, /连接网关失败/)
+  assert.equal(quiet.status, 'current')
+  assert.equal(report.changed, false)
+  const after = await fsp.readFile(resolved.patchFile, 'utf8')
+  assert.ok(after.startsWith('# profile patch'))
+})
+
+test('unlockProviderThinking refuses a patch without the llm-pi-ai entry', async (t) => {
+  const { fsp, resolved, env } = await unlockSandbox(t)
+  await fsp.writeFile(resolved.patchFile, '# nothing here\n- id: ui-chat\n', { mode: 0o600 })
+  await assert.rejects(() => unlockProviderThinking(env, { fetchImpl: stubFetch({}) }), /没有 - id: llm-pi-ai 条目/)
 })

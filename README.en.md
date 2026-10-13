@@ -6,15 +6,17 @@
 
 **English** | [简体中文](README.md)
 
-Adds three visual pages to the DeepSeek Harness (DSH) **Settings** so that three things you would
-otherwise hand-edit in files become point-and-click operations:
+Adds four visual pages to the DeepSeek Harness (DSH) **Settings**. The headline one is **one-click
+thinking unlock**: it detects which thinking levels each OpenAI-compatible gateway really supports and
+writes them into the model picker. The other three turn things you would otherwise hand-edit in files
+into point-and-click operations:
 
 | Settings page | What it manages | Where it writes |
 | --- | --- | --- |
 | **MCP servers** | add / remove / edit / enable–disable MCP servers | the current profile's `cordis.patch.yml` (managed block) + `.dsh-integration/mcp.json` (source of truth) |
 | **Skills** | browse / create / edit / delete skills | DSH global, shared `.agents`, Claude / Codex global directories, plus the current project's `.dsh` / `.agents` / `.claude` directories |
 | **Global persona** | visually edit the persona file (the equivalent of Claude Code's `CLAUDE.md`) | `$DSH_HOME/AGENTS.md` (global) and `<project>/AGENTS.md` (current project) |
-| **Model providers** | add / edit / delete OpenAI-compatible gateway providers, pulling the model list and thinking levels | the current profile's `cordis.patch.yml` (the `llm-pi-ai` entry's `config.providers`) + `$DSH_HOME/.credentials.yaml` (`refs`, secrets only) |
+| **Thinking unlock** | detects each gateway's supported thinking levels on page open and unlocks them in one click; also add / edit / delete OpenAI-compatible gateways and pull model lists | the current profile's `cordis.patch.yml` (the `llm-pi-ai` entry's `config.providers`) + `$DSH_HOME/.credentials.yaml` (`refs`, secrets only) |
 
 > This is a community plugin, not an official DeepSeek product. Evaluate it yourself before
 > installing, and consider backing up your profile directory first.
@@ -148,7 +150,30 @@ patch.**
 - If the profile patch file is still the template's empty `[]` placeholder, the plugin drops that line
   before writing the managed block, avoiding invalid YAML such as `Unexpected seq-item-ind token`.
 
-### Model providers
+### Thinking unlock (and model providers)
+DSH providers live in `@deepseek-ai/dsh-llm-pi-ai`'s `config.providers`, written into each profile's
+`cordis.patch.yml`. A declared `reasoningEfforts` dict is a **whitelist**: levels you do not declare
+show up greyed out in the model picker, so "can I pick High / Max on this model?" is decided entirely
+by those few dozen lines of YAML. This page automates that.
+
+**Auto-detect + one-click unlock**
+
+- **Detected on page open**: the page sends one read-only `GET /models` per configured gateway, reads
+  `reasoning_supported_efforts` / `can_disable_thinking` and diffs it against the current config.
+  Detection **writes nothing**; the page shows "N to unlock / M already current / K gateway-silent".
+- **One click to unlock**: "Unlock all" writes the levels back to `cordis.patch.yml`, with a backup
+  first. **The gateway's capability table is the only truth** — if it says a model only supports
+  `medium`, only `medium` is declared, and levels your config had on top of that are dropped. Before
+  unlocking, the page lists every such model with its `old levels → new levels`.
+- **Only the gateways in this entry**: only providers under `- id: llm-pi-ai`'s `config.providers` are
+  read or rewritten. DSH's built-in `deepseek-official` / `deepseek-account` do not live in this file.
+- **A silent gateway changes nothing**: when the gateway reports no thinking information for a model,
+  your existing declaration is kept — the plugin never writes `reasoningEfforts: false` for you, which
+  would declare the model non-reasoning.
+- **One failing gateway does not block the rest**: it is reported separately, the others still unlock.
+
+**The form (add / edit / delete a gateway)**
+
 - DSH has no built-in way to add a provider: a provider only exists as a `config.providers` entry
   inside `- id: llm-pi-ai`, so this page merges into that existing entry. Adding a second entry with
   the same id makes DSH fail at startup (dedupe with `dev_fix_patch`); when the entry is missing the
@@ -163,12 +188,10 @@ patch.**
 - **Secrets never go into the patch**: `apiKeyEnv` is only a reference name; the secret itself is
   written to the `refs:` section of `$DSH_HOME/.credentials.yaml`. The apiKey field is only needed when
   adding a provider or rotating a key — leave it empty to keep the stored secret.
-- **Thinking levels are mapped automatically** from the gateway's `reasoning_supported_efforts`. Note
-  that `off` must be quoted (`"off":`) because YAML 1.1 parses a bare `off:` as boolean `false`. A
-  declared `reasoningEfforts` dict is a whitelist — undeclared levels are not selectable; `false` means
-  the model does not support thinking; `{}` and omitting the field both keep whatever the installed
-  catalog declares.
-- Saving and deleting both write a `.bak-<timestamp>` backup (3 kept) and both files are written `0600`.
+- **`off` must stay quoted** (`"off":`) because YAML 1.1 parses a bare `off:` as boolean `false`, which
+  would give the level dict a non-string key.
+- Saving, unlocking and deleting all write a `.bak-<timestamp>` backup (3 kept) and both files are
+  written `0600`.
 
 Restart DSH for changes to take effect; before restarting you can check each model with `de_models`.
 

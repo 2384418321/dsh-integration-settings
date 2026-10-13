@@ -87,7 +87,7 @@ test('client bundle registers the four settings sections without a locale servic
     assert.equal(typeof entry.component, 'function')
   }
   const titles = registered.map((entry) => entry.spec.label())
-  assert.deepEqual(titles, ['MCP 管理', 'Skill 管理', '全局人设', '模型供应商'])
+  assert.deepEqual(titles, ['MCP 管理', 'Skill 管理', '全局人设', '思考解锁'])
   assert.ok(registered[0].spec.order < registered[1].spec.order)
   assert.ok(registered[1].spec.order < registered[2].spec.order)
   assert.ok(registered[2].spec.order < registered[3].spec.order)
@@ -98,14 +98,14 @@ test('client bundle survives a locale service and localizes labels through it', 
   const dicts = []
   const locale = {
     register: (ns, tag, dict) => { dicts.push({ ns, tag, keys: Object.keys(dict).length }); return () => {} },
-    bind: (ns) => (key) => ({ 'mcp.title': 'MCP servers', 'skills.title': 'Skills', 'persona.title': 'Global persona', 'providers.title': 'Model providers' }[key] || key),
+    bind: (ns) => (key) => ({ 'mcp.title': 'MCP servers', 'skills.title': 'Skills', 'persona.title': 'Global persona', 'providers.title': 'Thinking unlock' }[key] || key),
   }
   const { ctx, registered } = fakeCtx({ locale })
   mod.apply(ctx)
 
   assert.equal(dicts.length, 2, 'registers the zh and en dictionaries')
   assert.deepEqual(dicts.map((d) => d.tag), ['zh', 'en'])
-  assert.deepEqual(registered.map((entry) => entry.spec.label()), ['MCP servers', 'Skills', 'Global persona', 'Model providers'])
+  assert.deepEqual(registered.map((entry) => entry.spec.label()), ['MCP servers', 'Skills', 'Global persona', 'Thinking unlock'])
 })
 
 test('client bundle falls back to built-in labels when the locale service throws', async () => {
@@ -116,5 +116,5 @@ test('client bundle falls back to built-in labels when the locale service throws
   }
   const { ctx, registered } = fakeCtx({ locale })
   assert.doesNotThrow(() => mod.apply(ctx))
-  assert.deepEqual(registered.map((entry) => entry.spec.label()), ['MCP 管理', 'Skill 管理', '全局人设', '模型供应商'])
+  assert.deepEqual(registered.map((entry) => entry.spec.label()), ['MCP 管理', 'Skill 管理', '全局人设', '思考解锁'])
 })

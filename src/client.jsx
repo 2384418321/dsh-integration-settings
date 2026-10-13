@@ -15,8 +15,8 @@ const ZH = {
   'skills.desc': '可视化浏览、编辑、新建技能文件（SKILL.md）',
   'persona.title': '全局人设',
   'persona.desc': '可视化编辑 DSH 的全局人设文件 AGENTS.md',
-  'providers.title': '模型供应商',
-  'providers.desc': '可视化新增 OpenAI 兼容网关供应商，自动拉取模型列表与思考档位',
+  'providers.title': '思考解锁',
+  'providers.desc': '打开即自动识别 OpenAI 兼容网关支持的思考档位，一键解锁到模型选择器',
 }
 const EN = {
   'group.title': 'Integrations',
@@ -26,8 +26,8 @@ const EN = {
   'skills.desc': 'Browse, edit and create SKILL.md files',
   'persona.title': 'Global persona',
   'persona.desc': "Edit DSH's global persona file AGENTS.md",
-  'providers.title': 'Model providers',
-  'providers.desc': 'Add OpenAI-compatible gateways and pull their model list and thinking levels',
+  'providers.title': 'Thinking unlock',
+  'providers.desc': 'Detects each gateway on open and unlocks its thinking levels with one click',
 }
 
 function makeT(ctx) {
@@ -898,6 +898,70 @@ function ProviderSection(props) {
     }
   }
 
+  const providerKey = providers.map((p) => p.id).join(',')
+  const [scan, setScan] = useState({ loading: false, at: null, error: null, data: null })
+
+  // Read-only detection: probes every configured gateway and reports which
+  // models are missing thinking levels. Runs on open, writes nothing.
+  const detect = async () => {
+    if (!providers.length) return
+    setScan({ loading: true, at: null, error: null, data: null })
+    try {
+      const data = await api('/provider/unlock', {
+        method: 'POST',
+        sessionId,
+        body: { providerIds: providers.map((p) => p.id), dryRun: true },
+      })
+      setScan({ loading: false, at: Date.now(), error: null, data })
+    } catch (err) {
+      setScan({ loading: false, at: Date.now(), error: err.message || String(err), data: null })
+    }
+  }
+
+  useEffect(() => { detect() }, [providerKey, sessionId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const unlockAll = async () => {
+    if (!providers.length) return
+    setBusy(true); setError(null); setMessage(null)
+    try {
+      const result = await api('/provider/unlock', {
+        method: 'POST',
+        sessionId,
+        body: { providerIds: providers.map((p) => p.id) },
+      })
+      const failed = (result.providers || []).filter((r) => r.status === 'error')
+      const parts = []
+      parts.push(result.unlockedModels
+        ? `已解锁 ${result.unlockedModels} 个模型（${(result.unlockedProviders || []).join('、')}）`
+        : '所有供应商的思考档位都已是最新，没有改动文件')
+      if (failed.length) parts.push(`探测失败：${failed.map((r) => `${r.id}（${r.error}）`).join('；')}`)
+      if (result.changed) parts.push('写配置前已自动备份，重启 DeepSeek Harness 后生效。')
+      setMessage(parts.join('　'))
+      state.reload()
+      await detect()
+    } catch (err) {
+      setError(err.message || String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const scanFor = (id) => (scan.data && (scan.data.providers || []).find((r) => r.id === id)) || null
+
+  const scanBadge = (id) => {
+    const row = scanFor(id)
+    if (!row) return null
+    if (row.status === 'error') return h('span', { className: 'dsi-badge dsi-badge-off' }, '探测失败')
+    if (row.status === 'missing') return h('span', { className: 'dsi-badge dsi-badge-off' }, '配置已不在文件里')
+    const parts = []
+    if (row.unlocked) parts.push(`待解锁 ${row.unlocked}`)
+    if (row.already) parts.push(`已解锁 ${row.already}`)
+    if (row.silent) parts.push(`网关未声明 ${row.silent}`)
+    if (row.gone) parts.push(`网关已不提供 ${row.gone}`)
+    return h('span', { className: row.unlocked ? 'dsi-badge dsi-badge-off' : 'dsi-badge dsi-badge-on' },
+      parts.join(' · ') || `${row.scanned} 个模型`)
+  }
+
   const save = () => run(async () => {
     const models = (draft.models || []).filter((m) => m.checked).map(({ checked, ...rest }) => rest)
     if (!models.length) throw new Error('至少勾选一个模型（先点「测试连接并拉取模型」）')
@@ -929,22 +993,45 @@ function ProviderSection(props) {
     )
   }
 
+  const pending = (scan.data && scan.data.unlockedModels) || 0
+  const pendingRows = (scan.data ? scan.data.providers || [] : [])
+    .reduce((rows, r) => rows.concat((r.details || []).filter((d) => d.status === 'unlocked')), [])
+  const narrowedRows = pendingRows.filter((d) => (d.lost || []).length)
   const actions = h(React.Fragment, null,
-    h(Button, { variant: 'primary', disabled: !!draft || busy, onClick: startNew }, '新增供应商'),
-    h(Button, { disabled: busy, onClick: state.reload }, '刷新'),
+    h(Button, {
+      variant: 'primary',
+      disabled: !!draft || busy || scan.loading || !providers.length,
+      onClick: unlockAll,
+    }, pending ? `全部解锁（${pending} 个模型待更新）` : '全部解锁'),
+    h(Button, { disabled: !!draft || busy, onClick: startNew }, '新增供应商'),
+    h(Button, { disabled: busy, onClick: () => { state.reload(); detect() } }, '重新识别'),
   )
 
   return h(Panel, {
-    title: '模型供应商',
-    desc: h('span', null, '增删改 OpenAI 兼容网关，自动拉取模型与思考档位，写入 ',
-      h('code', null, patchFile || 'profile/cordis.patch.yml'), ' 与 ',
-      h('code', null, credentialsFile || '~/.dsh/.credentials.yaml'), '　（保存后需重启 DSH 生效）'),
+    title: '思考解锁',
+    desc: h('span', null, '打开页面即自动识别每个网关支持的思考档位（只读探测）；点「全部解锁」按网关实际能力写进 ',
+      h('code', null, patchFile || 'profile/cordis.patch.yml'),
+      '　只解锁这个 profile 里 ',
+      h('code', null, info.entryId || 'llm-pi-ai'),
+      ' 条目下的网关，写前自动备份，重启 DSH 后生效。'),
     actions,
     footer: patchFile ? `配置文件：${patchFile}${credentialsFile ? `　密钥文件：${credentialsFile}` : ''}` : null,
   },
     h(Styles),
     h(Note, { kind: 'error' }, error),
     h(Note, { kind: 'ok' }, message),
+    scan.loading ? h('div', { className: 'dsi-hint' }, '正在识别网关支持的思考档位…') : null,
+    scan.error ? h(Note, { kind: 'error' }, `自动识别失败：${scan.error}`) : null,
+    scan.data && !scan.data.unlockedModels && providers.length
+      ? h('div', { className: 'dsi-hint' }, '这些网关的思考档位都已是最新。') : null,
+    pendingRows.length
+      ? h('div', { className: 'dsi-hint' },
+        `检测到 ${pendingRows.length} 个模型的档位与网关不一致`
+        + (narrowedRows.length ? `（其中 ${narrowedRows.length} 个会减少档位）` : '')
+        + '：'
+        + pendingRows.slice(0, 3).map((d) => `${d.id}（${(d.from.length ? d.from : ['未声明']).join('/')} → ${d.to.join('/')}）`).join('；')
+        + (pendingRows.length > 3 ? ` 等 ${pendingRows.length} 个` : ''))
+      : null,
     state.loading && !data ? h(Spinner) : null,
     state.error ? h(Note, { kind: 'error' }, `读取失败：${state.error}`) : null,
     data && info.entryFound === false
@@ -960,6 +1047,7 @@ function ProviderSection(props) {
       h('div', { className: 'dsi-row-main' },
         h('div', { className: 'dsi-row-name' }, provider.id,
           h('span', { className: 'dsi-badge' }, `${provider.modelCount} 模型`),
+          scanBadge(provider.id),
           provider.apiKeyEnv
             ? h('span', { className: provider.hasCredential ? 'dsi-badge dsi-badge-on' : 'dsi-badge dsi-badge-off' },
               provider.hasCredential ? '密钥已配置' : '缺少密钥')

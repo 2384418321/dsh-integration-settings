@@ -1,6 +1,6 @@
 {
   "name": "dsh-integration-settings",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "type": "module",
   "description": "集成插件：在 DSH 设置中加入「MCP 管理 / Skill 管理 / 全局人设 / 模型供应商」四个可视化页面",
   "license": "MIT",

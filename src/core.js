@@ -1022,6 +1022,20 @@ export function readCredentialNames(text) {
   return YAML.isMap(refs) ? refs.items.map((pair) => String(nodeToJs(pair.key) ?? '')).filter(Boolean) : []
 }
 
+/**
+ * Read one secret out of the credentials file's `refs` map. Host-only: the value
+ * never travels back to the browser, it is used locally to authenticate a probe.
+ */
+export function readCredentialValue(text, name) {
+  const doc = parseYamlDocument(text, '凭据文件')
+  const refs = YAML.isMap(doc.contents) ? doc.contents.get('refs', true) : null
+  if (!YAML.isMap(refs)) return ''
+  for (const pair of refs.items) {
+    if (String(nodeToJs(pair.key) ?? '') === String(name)) return String(nodeToJs(pair.value) ?? '').trim()
+  }
+  return ''
+}
+
 export function mergeCredentialRef(text, name, value) {
   if (!ENV_NAME_RE.test(String(name ?? ''))) {
     throw httpError(400, 'error.provider.env', '密钥引用的名字需为全大写字母/数字/下划线')
@@ -1152,4 +1166,147 @@ export async function deleteProvider(env = process.env, { providerId, dropCreden
   }
   await writeWithBackup(p.patchFile, nextPatch, 0o600, 3)
   return { providerId: id, credentialRemoved, credentialInUse, patchFile: p.patchFile }
+}
+
+/* --- thinking unlock ------------------------------------------------------ */
+//
+// "Unlock" is deliberately one-directional. The gateway's capability table is
+// the ceiling: a model the gateway advertises levels for gets exactly those
+// levels declared, and a model the gateway stays silent about is left alone.
+// Nothing here ever removes a level or writes `reasoningEfforts: false`, so a
+// hand-tuned model cannot lose thinking by pressing the button.
+
+function declaredEfforts(model) {
+  const raw = model?.reasoningEfforts
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) return raw
+  return null
+}
+
+/**
+ * Decide the new `models[]` for one provider. Pure: it takes the configured rows
+ * plus the gateway rows and reports what it would change, so the caller can skip
+ * writing — and skip touching the file at all — when nothing is out of date.
+ */
+export function unlockPlan(configuredModels, gatewayModels) {
+  const byId = new Map()
+  for (const row of Array.isArray(gatewayModels) ? gatewayModels : []) {
+    byId.set(String(row?.id ?? ''), row)
+  }
+  const report = { scanned: 0, unlocked: 0, already: 0, silent: 0, gone: 0, narrowed: 0, details: [] }
+  const models = []
+  for (const row of Array.isArray(configuredModels) ? configuredModels : []) {
+    const model = { ...row }
+    const id = String(model.id ?? '')
+    report.scanned += 1
+    const gateway = byId.get(id)
+    if (!gateway) {
+      // The gateway no longer lists it — leave the declared row untouched.
+      report.gone += 1
+      report.details.push({ id, status: 'gone' })
+      models.push(model)
+      continue
+    }
+    const advertised = declaredEfforts(gateway)
+    if (!advertised) {
+      // No thinking advertised: keep whatever was configured, never lock it.
+      report.silent += 1
+      report.details.push({ id, status: 'silent' })
+      models.push(model)
+      continue
+    }
+    const current = declaredEfforts(model)
+    if (current && stableShape(current) === stableShape(advertised)) {
+      report.already += 1
+      report.details.push({ id, status: 'current', levels: Object.keys(advertised) })
+      models.push(model)
+      continue
+    }
+    model.reasoningEfforts = advertised
+    const fallback = String(gateway?.reasoning ?? '').trim()
+    if (fallback && Object.prototype.hasOwnProperty.call(advertised, fallback)) model.reasoning = fallback
+    // The gateway table is the truth, so a level the config declared but the
+    // gateway does not accept disappears. Count those so the page can say so
+    // instead of narrowing a model silently.
+    const from = current ? Object.keys(current) : []
+    const to = Object.keys(advertised)
+    const lost = from.filter((level) => !to.includes(level))
+    if (lost.length) report.narrowed += 1
+    report.unlocked += 1
+    report.details.push({ id, status: 'unlocked', levels: to, from, to, lost })
+    models.push(model)
+  }
+  return { models, report }
+}
+
+/**
+ * Probe every configured gateway (or the given subset) and write back the
+ * thinking levels each one advertises.
+ *
+ * Only the `llm-pi-ai` entry's own providers are reachable from here — nothing
+ * else in the patch and nothing in the credentials file is touched, and each
+ * rewritten provider is spliced over its own byte range so the rest of the file
+ * keeps its original formatting.
+ */
+export async function unlockProviderThinking(env = process.env, { providerIds, dryRun = false, fetchImpl } = {}) {
+  const p = paths(env)
+  const [patchText, credentialsText] = await Promise.all([
+    readTextFile(p.patchFile, ''),
+    readTextFile(p.credentialsFile, ''),
+  ])
+  const { entryFound, providers } = readProvidersFromPatch(patchText)
+  if (!entryFound) {
+    throw httpError(404, 'error.provider.entry', `这个 profile 的 cordis.patch.yml 里没有 - id: ${PROVIDERS_ENTRY_ID} 条目`)
+  }
+  const wanted = Array.isArray(providerIds) && providerIds.length
+    ? providerIds.map((value) => validateProviderId(value))
+    : Object.keys(providers)
+
+  let nextPatch = patchText
+  const results = []
+  for (const id of wanted) {
+    const raw = providers[id]
+    if (!raw) {
+      results.push({ id, status: 'missing', error: `未找到供应商：${id}` })
+      continue
+    }
+    try {
+      const envName = String(raw.apiKeyEnv ?? '')
+      const probed = await probeGateway(
+        { baseURL: raw.baseURL, apiKey: envName ? readCredentialValue(credentialsText, envName) : '' },
+        fetchImpl,
+      )
+      const { models, report } = unlockPlan(raw.models, probed.models)
+      if (dryRun) {
+        // Detection only: report what is out of date without touching the file.
+        results.push({ id, status: report.unlocked ? 'pending' : 'current', modelCount: models.length, ...report })
+        continue
+      }
+      if (!report.unlocked) {
+        results.push({ id, status: 'current', modelCount: models.length, ...report })
+        continue
+      }
+      // Merge into a temporary first: a provider that fails to render must not
+      // leave a half-built document behind for the next provider to merge into.
+      const merged = mergeProviderIntoPatch(nextPatch, id, { ...raw, models })
+      validatePatchText(merged)
+      nextPatch = merged
+      results.push({ id, status: 'unlocked', modelCount: models.length, ...report })
+    } catch (err) {
+      results.push({ id, status: 'error', error: err?.message || String(err) })
+    }
+  }
+
+  const changed = !dryRun && nextPatch !== patchText
+  if (changed) await writeWithBackup(p.patchFile, nextPatch, 0o600, 3)
+  return {
+    entryFound,
+    entryId: PROVIDERS_ENTRY_ID,
+    patchFile: p.patchFile,
+    credentialsFile: p.credentialsFile,
+    dryRun: !!dryRun,
+    changed,
+    providers: results,
+    unlockedProviders: results.filter((r) => (r.unlocked || 0) > 0).map((r) => r.id),
+    unlockedModels: results.reduce((total, r) => total + (r.unlocked || 0), 0),
+  }
 }
