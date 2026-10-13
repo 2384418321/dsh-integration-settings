@@ -118,8 +118,9 @@ test('every section renders markup against the shell React seed', async () => {
   assert.match(persona, /人设|persona/i)
   assert.match(providers, /思考解锁/)
   assert.match(providers, /全部解锁/)
-  // the provider management form is gone for good
-  assert.doesNotMatch(providers, /新增供应商|测试连接|拉取模型/)
+  // add/edit is available again, but the delete path stays gone for good
+  assert.match(providers, /新增网关/)
+  assert.doesNotMatch(providers, /删除|移除网关/)
 })
 
 test('sections render against a plain React namespace too', async () => {

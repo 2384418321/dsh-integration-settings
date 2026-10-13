@@ -620,7 +620,9 @@ export async function savePersona(env = process.env, { scope = 'global', cwd = n
 export const PROVIDERS_ENTRY_ID = 'llm-pi-ai'
 export const PROVIDERS_PACKAGE = '@deepseek-ai/dsh-llm-pi-ai'
 export const PROVIDER_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/
+export const ENV_NAME_RE = /^[A-Z][A-Z0-9_]{1,63}$/
 export const PROBE_TIMEOUT_MS = 15000
+export const KIND_TIMEOUT_MS = 5000
 /** Level ids understood by @deepseek-ai/dsh-llm-pi-ai, ascending. */
 export const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
@@ -816,6 +818,64 @@ function stringifyPatch(doc) {
   return YAML.stringify(doc, { lineWidth: 0 }).replace(/"off": null/g, '"off":')
 }
 
+export function validateModel(input) {
+  const id = String(input?.id ?? '').trim()
+  if (!id) throw httpError(400, 'error.provider.model', '模型 id 不能为空')
+  const model = { id, name: String(input?.name ?? '').trim() || id }
+  const contextWindow = Number(input?.contextWindow)
+  if (Number.isFinite(contextWindow) && contextWindow > 0) model.contextWindow = Math.trunc(contextWindow)
+  const maxTokens = Number(input?.maxTokens)
+  if (Number.isFinite(maxTokens) && maxTokens > 0) model.maxTokens = Math.trunc(maxTokens)
+  const kinds = (Array.isArray(input?.input) ? input.input : ['text']).map((v) => String(v))
+  model.input = kinds.filter((v) => v === 'text' || v === 'image')
+  if (!model.input.length) model.input = ['text']
+  // `reasoningEfforts: false` is the documented spelling for "this model does
+  // not reason" — a declaration, not an absent value, so it must survive a
+  // round trip instead of being dropped.
+  const raw = input?.reasoningEfforts
+  if (raw === false) {
+    model.reasoningEfforts = false
+  } else if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    const efforts = {}
+    const declared = Object.keys(raw).filter((key) => !THINKING_LEVELS.includes(key))
+    for (const level of [...THINKING_LEVELS, ...declared]) {
+      if (!Object.prototype.hasOwnProperty.call(raw, level)) continue
+      const value = raw[level]
+      // The value is the spelling dispatch sends on the wire (`max: ultra`
+      // renames a level for a gateway with its own vocabulary), so write it
+      // back verbatim; a valueless level stays valueless.
+      efforts[level] = value === null || value === undefined || value === '' ? null : String(value)
+    }
+    if (Object.keys(efforts).length) model.reasoningEfforts = efforts
+  }
+  const reasoning = String(input?.reasoning ?? '').trim()
+  if (reasoning && THINKING_LEVELS.includes(reasoning)) model.reasoning = reasoning
+  return model
+}
+
+
+export function renderProviderConfig(draft) {
+  const apiKeyEnv = String(draft?.apiKeyEnv ?? '').trim()
+  if (!ENV_NAME_RE.test(apiKeyEnv)) {
+    throw httpError(400, 'error.provider.env', 'apiKeyEnv 需为全大写字母/数字/下划线，例如 WORKBUDY_LAN_API_KEY')
+  }
+  const models = Array.isArray(draft?.models) ? draft.models : []
+  if (!models.length) throw httpError(400, 'error.provider.models', '至少需要保留一个模型')
+  const reasoning = String(draft?.reasoning ?? '').trim()
+  if (reasoning && !THINKING_LEVELS.includes(reasoning)) {
+    throw httpError(400, 'error.provider.reasoning', `未知的默认思考档位：${reasoning}`)
+  }
+  const provider = {
+    apiKeyEnv,
+    api: String(draft?.api ?? '').trim() || 'openai-completions',
+    baseURL: normalizeBaseURL(draft?.baseURL),
+    models: models.map(validateModel),
+  }
+  if (reasoning) provider.reasoning = reasoning
+  return provider
+}
+
+
 export function readProvidersFromPatch(patchText) {
   let doc
   try {
@@ -953,6 +1013,27 @@ export function readCredentialValue(text, name) {
   return ''
 }
 
+export function mergeCredentialRef(text, name, value) {
+  if (!ENV_NAME_RE.test(String(name ?? ''))) {
+    throw httpError(400, 'error.provider.env', '密钥引用的名字需为全大写字母/数字/下划线')
+  }
+  const secret = String(value ?? '').trim()
+  if (!secret) throw httpError(400, 'error.provider.secret', 'API Key 不能为空')
+  const doc = parseYamlDocument(text, '凭据文件')
+  if (doc.contents == null) doc.contents = doc.createNode({})
+  if (!YAML.isMap(doc.contents)) throw httpError(500, 'error.credentials.shape', '凭据文件顶层不是映射')
+  let refs = doc.contents.get('refs', true)
+  if (refs !== undefined && !YAML.isMap(refs)) {
+    throw httpError(500, 'error.credentials.shape', '凭据文件的 refs 不是映射，已中止以免破坏现有记录')
+  }
+  if (!YAML.isMap(refs)) {
+    refs = doc.createNode({})
+    doc.contents.set('refs', refs)
+  }
+  refs.set(String(name), doc.createNode(secret))
+  return YAML.stringify(doc, { lineWidth: 0 })
+}
+
 export async function readProviderState(env = process.env) {
   const p = paths(env)
   const [patchText, credentialsText] = await Promise.all([
@@ -987,6 +1068,37 @@ export async function readProviderState(env = process.env) {
     credentialNames,
   }
 }
+
+/** Add or update one provider in place. There is deliberately no delete path. */
+export async function saveProvider(env = process.env, { providerId, provider, apiKey } = {}) {
+  const id = validateProviderId(providerId)
+  const p = paths(env)
+  const patchText = await readTextFile(p.patchFile, '')
+  const config = renderProviderConfig(provider)
+  const created = !Object.prototype.hasOwnProperty.call(readProvidersFromPatch(patchText).providers, id)
+  const nextPatch = mergeProviderIntoPatch(patchText, id, config)
+  validatePatchText(nextPatch)
+
+  let credentialsWritten = false
+  const secret = String(apiKey ?? '').trim()
+  if (secret) {
+    const credentialsText = await readTextFile(p.credentialsFile, 'version: 1\n')
+    const nextCredentials = mergeCredentialRef(credentialsText, config.apiKeyEnv, secret)
+    await writeWithBackup(p.credentialsFile, nextCredentials, 0o600, 3)
+    credentialsWritten = true
+  }
+  await writeWithBackup(p.patchFile, nextPatch, 0o600, 3)
+  return {
+    providerId: id,
+    created,
+    modelCount: config.models.length,
+    apiKeyEnv: config.apiKeyEnv,
+    credentialsWritten,
+    patchFile: p.patchFile,
+    credentialsFile: p.credentialsFile,
+  }
+}
+
 
 /* --- thinking unlock ------------------------------------------------------ */
 //
@@ -1037,6 +1149,48 @@ function declaredEfforts(model) {
  * plus the gateway rows and reports what it would change, so the caller can skip
  * writing — and skip touching the file at all — when nothing is out of date.
  */
+/**
+ * WorkBuddy gateways announce themselves: `GET <origin>/healthz` answers without a
+ * key and names the stack in `service` (`workbuddy2api` on the LAN box,
+ * `workbuddy-manager` on the cloud one). A gateway that stays silent there is
+ * reported as unidentified instead of being guessed at.
+ */
+export async function detectGatewayKind({ baseURL } = {}, fetchImpl) {
+  const doFetch = fetchImpl || globalThis.fetch
+  let origin = ''
+  try {
+    origin = new URL(normalizeBaseURL(baseURL)).origin
+  } catch {
+    return { kind: 'unknown', reason: 'baseURL 无法解析，跳过身份探测' }
+  }
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), KIND_TIMEOUT_MS)
+  try {
+    const response = await doFetch(`${origin}/healthz`, { headers: { accept: 'application/json' }, signal: controller.signal })
+    if (!response || !response.ok) {
+      return { kind: 'unknown', reason: `/healthz 返回 HTTP ${response ? response.status : '无响应'}` }
+    }
+    const header = typeof response.headers?.get === 'function' ? String(response.headers.get('x-service') || '') : ''
+    const body = await response.json().catch(() => null)
+    const service = String((body && body.service) || '').trim()
+    if (/workbuddy/i.test(service) || /workbuddy/i.test(header)) {
+      return { kind: 'workbuddy', service: service || header, source: 'healthz' }
+    }
+    return { kind: 'unknown', reason: `/healthz 未表明身份${service ? `（service=${service}）` : ''}` }
+  } catch (err) {
+    return { kind: 'unknown', reason: `/healthz 探测失败：${err?.message || String(err)}` }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** Every id on these gateways carries a realm prefix (`cn:` / `global:`). */
+export function realmNamespaced(models) {
+  const ids = (Array.isArray(models) ? models : []).map((m) => String(m?.id ?? '')).filter(Boolean)
+  if (!ids.length) return false
+  return ids.every((id) => /^(cn|global):/.test(id))
+}
+
 export function unlockPlan(configuredModels, gatewayModels) {
   const byId = new Map()
   for (const row of Array.isArray(gatewayModels) ? gatewayModels : []) {
@@ -1097,7 +1251,7 @@ export function unlockPlan(configuredModels, gatewayModels) {
  * rewritten provider is spliced over its own byte range so the rest of the file
  * keeps its original formatting.
  */
-export async function unlockProviderThinking(env = process.env, { providerIds, dryRun = false, fetchImpl } = {}) {
+export async function unlockProviderThinking(env = process.env, { providerIds, dryRun = false, onlyWorkbuddy = true, fetchImpl } = {}) {
   const p = paths(env)
   const [patchText, credentialsText] = await Promise.all([
     readTextFile(p.patchFile, ''),
@@ -1141,14 +1295,29 @@ export async function unlockProviderThinking(env = process.env, { providerIds, d
       const envName = String(raw.apiKeyEnv ?? '')
       const secret = envName ? readCredentialValue(credentialsText, envName) || String(env?.[envName] ?? '') : ''
       const probed = await probeGateway({ baseURL: raw.baseURL, apiKey: secret }, fetchImpl)
+      const identity = await detectGatewayKind({ baseURL: raw.baseURL }, fetchImpl)
+      const kindSource = identity.kind === 'workbuddy' ? 'healthz' : realmNamespaced(probed.models) ? 'model-id-prefix' : null
+      if (onlyWorkbuddy && !kindSource) {
+        // A reachable gateway this plugin does not own: listed with the reason, never written.
+        results.push({
+          id,
+          verdict: 'other',
+          status: 'skipped',
+          reason: `${identity.reason || '不是 WorkBuddy 网关'}；模型 id 也不带 cn:/global: 命名空间`,
+          service: identity.service || '',
+          modelCount: Array.isArray(raw.models) ? raw.models.length : 0,
+          scanned: probed.models.length,
+        })
+        continue
+      }
       const { models, report } = unlockPlan(raw.models, probed.models)
       if (dryRun) {
         // Detection only: report what is out of date without touching the file.
-        results.push({ id, verdict: 'gateway', reason: judged.reason, status: report.unlocked ? 'pending' : 'current', modelCount: models.length, ...report })
+        results.push({ id, verdict: 'gateway', reason: judged.reason, status: report.unlocked ? 'pending' : 'current', service: identity.service || '', kindSource, modelCount: models.length, ...report })
         continue
       }
       if (!report.unlocked) {
-        results.push({ id, verdict: 'gateway', reason: judged.reason, status: 'current', modelCount: models.length, ...report })
+        results.push({ id, verdict: 'gateway', reason: judged.reason, status: 'current', service: identity.service || '', kindSource, modelCount: models.length, ...report })
         continue
       }
       // Merge into a temporary first: a provider that fails to render must not
@@ -1156,7 +1325,7 @@ export async function unlockProviderThinking(env = process.env, { providerIds, d
       const merged = mergeProviderIntoPatch(nextPatch, id, { ...raw, models })
       validatePatchText(merged)
       nextPatch = merged
-      results.push({ id, verdict: 'gateway', reason: judged.reason, status: 'unlocked', modelCount: models.length, ...report })
+      results.push({ id, verdict: 'gateway', reason: judged.reason, status: 'unlocked', service: identity.service || '', kindSource, modelCount: models.length, ...report })
     } catch (err) {
       const message = err?.message || String(err)
       results.push({ id, verdict: 'unreachable', status: 'error', reason: `探测失败：${message}`, error: message })
@@ -1171,11 +1340,14 @@ export async function unlockProviderThinking(env = process.env, { providerIds, d
     patchFile: p.patchFile,
     credentialsFile: p.credentialsFile,
     dryRun: !!dryRun,
+    onlyWorkbuddy: !!onlyWorkbuddy,
     changed,
     providers: results,
     scannedProviders: results.length,
     gatewayProviders: results.filter((r) => r.verdict === 'gateway').map((r) => r.id),
     skippedProviders: results.filter((r) => r.verdict === 'skipped').map((r) => r.id),
+    otherProviders: results.filter((r) => r.verdict === 'other').map((r) => r.id),
+    workbuddyProviders: results.filter((r) => r.verdict === 'gateway').map((r) => r.id),
     unlockedProviders: results.filter((r) => (r.unlocked || 0) > 0).map((r) => r.id),
     unlockedModels: results.reduce((total, r) => total + (r.unlocked || 0), 0),
   }

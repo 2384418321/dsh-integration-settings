@@ -765,6 +765,88 @@ function summarizeEfforts(models) {
  * be probed are reported, never guessed at, and nothing here adds, edits or
  * deletes a provider.
  */
+const EMPTY_PROVIDER = { id: '', apiKeyEnv: '', apiKey: '', baseURL: '', reasoning: '', models: [] }
+
+function suggestEnvName(id) {
+  const base = String(id || '').toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
+  return base ? `${base}_API_KEY` : ''
+}
+
+function ProviderEditor({ draft, setDraft, saving, probing, isNew, onCancel, onSave, onProbe }) {
+  const patch = (part) => setDraft((prev) => ({ ...prev, ...part }))
+  const models = draft.models || []
+  const chosen = models.filter((m) => m.checked)
+  const levels = []
+  for (const model of chosen) {
+    for (const level of Object.keys(model.reasoningEfforts || {})) if (!levels.includes(level)) levels.push(level)
+  }
+  levels.sort((a, b) => LEVEL_ORDER.indexOf(a) - LEVEL_ORDER.indexOf(b))
+  const toggle = (id, checked) => patch({ models: models.map((m) => (m.id === id ? { ...m, checked } : m)) })
+  const setAll = (checked) => patch({ models: models.map((m) => ({ ...m, checked })) })
+
+  return h('div', { className: 'dsi-card' },
+    h('div', { className: 'dsi-inline' },
+      h('strong', { style: { fontSize: 13 } }, isNew ? '新增供应商' : `编辑供应商：${draft.id}`),
+      h('span', { className: 'dsi-badge' }, `${chosen.length}/${models.length} 个模型已勾选`),
+    ),
+    h('div', { className: 'dsi-grid2' },
+      h(Field, { label: 'id', hint: '1–32 位字母/数字/点/下划线/连字符；会出现在模型选择器里' },
+        h(Text, {
+          value: draft.id, mono: true, placeholder: 'workbudy-lan', disabled: !isNew,
+          onChange: (v) => patch({ id: v, apiKeyEnv: !draft.apiKeyEnv ? suggestEnvName(v) : draft.apiKeyEnv }),
+        }),
+      ),
+      h(Field, { label: 'baseURL', hint: 'OpenAI 兼容根地址，通常以 /v1 结尾' },
+        h(Text, { value: draft.baseURL, mono: true, placeholder: 'http://192.168.2.202:7863/v1', onChange: (v) => patch({ baseURL: v }) }),
+      ),
+      h(Field, { label: 'apiKeyEnv', hint: '密钥在凭据文件里的引用名；密钥本身不会写进 cordis.patch.yml' },
+        h(Text, { value: draft.apiKeyEnv, mono: true, placeholder: 'WORKBUDY_LAN_API_KEY', onChange: (v) => patch({ apiKeyEnv: v }) }),
+      ),
+      h(Field, { label: 'apiKey', hint: isNew ? '粘贴网关密钥，保存时写入凭据文件' : '留空表示不改动已保存的密钥' },
+        h('input', {
+          className: 'dsi-input dsi-mono', type: 'password', autoComplete: 'off', placeholder: 'sk-…',
+          value: draft.apiKey, onChange: (e) => patch({ apiKey: e.target.value }),
+        }),
+      ),
+    ),
+    h('div', { className: 'dsi-inline' },
+      h(Button, { disabled: probing || saving || !draft.baseURL, onClick: onProbe }, probing ? '正在连接…' : '测试连接并拉取模型'),
+      models.length ? h(Button, { disabled: saving, onClick: () => setAll(true) }, '全选') : null,
+      models.length ? h(Button, { disabled: saving, onClick: () => setAll(false) }, '全不选') : null,
+    ),
+    models.length
+      ? h('div', { style: { maxHeight: 300, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 4 } },
+        models.map((model) => h('label', {
+          key: model.id, className: 'dsi-check',
+          style: { padding: '5px 7px', borderRadius: 7, background: 'color-mix(in srgb, currentColor 4%, transparent)' },
+        },
+          h('input', { type: 'checkbox', checked: !!model.checked, onChange: (e) => toggle(model.id, e.target.checked) }),
+          h('span', { className: 'dsi-mono', style: { fontSize: 11.5 } }, model.id),
+          model.name && model.name !== model.id ? h('span', { style: { opacity: 0.6, fontSize: 11 } }, model.name) : null,
+          h('span', { style: { opacity: 0.45, fontSize: 10.5, marginLeft: 'auto', whiteSpace: 'nowrap' } },
+            [
+              model.contextWindow ? `ctx ${model.contextWindow}` : null,
+              model.maxTokens ? `max ${model.maxTokens}` : null,
+              describeEfforts(model),
+            ].filter(Boolean).join(' · ')),
+        )),
+      )
+      : h('div', { className: 'dsi-hint' }, '还没有模型列表：填好 baseURL（和密钥）后点「测试连接并拉取模型」。'),
+    levels.length
+      ? h(Field, { label: '默认思考档位（可选）', hint: '新对话的默认推理强度；只列出所选模型共同支持的档位' },
+        h('select', { className: 'dsi-select', value: draft.reasoning, onChange: (e) => patch({ reasoning: e.target.value }) },
+          h('option', { value: '' }, '不指定（用模型自带的默认档）'),
+          levels.map((level) => h('option', { key: level, value: level }, level)),
+        ),
+      )
+      : null,
+    h('div', { className: 'dsi-inline' },
+      h(Button, { variant: 'primary', disabled: saving || !chosen.length, onClick: onSave }, saving ? '保存中…' : '保存'),
+      h(Button, { disabled: saving, onClick: onCancel }, '取消'),
+    ),
+  )
+}
+
 function ProviderSection(props) {
   const sessionId = sessionIdOf(props)
   logSeat('settings.section', props)
@@ -780,6 +862,9 @@ function ProviderSection(props) {
   const credentialsFile = info.credentialsFile || ''
   const providerKey = providers.map((p) => p.id).join(',')
   const [scan, setScan] = useState({ loading: false, at: null, error: null, data: null })
+  const [onlyWorkbuddy, setOnlyWorkbuddy] = useState(true)
+  const [draft, setDraft] = useState(null)
+  const [probing, setProbing] = useState(false)
 
   // Read-only detection: probes every provider the host judged to be a gateway
   // and reports which models are missing thinking levels. Writes nothing.
@@ -790,7 +875,7 @@ function ProviderSection(props) {
       const result = await api('/provider/unlock', {
         method: 'POST',
         sessionId,
-        body: { providerIds: providers.map((p) => p.id), dryRun: true },
+        body: { providerIds: providers.map((p) => p.id), dryRun: true, onlyWorkbuddy },
       })
       setScan({ loading: false, at: Date.now(), error: null, data: result })
     } catch (err) {
@@ -798,7 +883,7 @@ function ProviderSection(props) {
     }
   }
 
-  useEffect(() => { detect() }, [providerKey, sessionId]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { detect() }, [providerKey, sessionId, onlyWorkbuddy]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const unlockAll = async () => {
     if (!providers.length) return
@@ -807,7 +892,7 @@ function ProviderSection(props) {
       const result = await api('/provider/unlock', {
         method: 'POST',
         sessionId,
-        body: { providerIds: providers.map((p) => p.id) },
+        body: { providerIds: providers.map((p) => p.id), onlyWorkbuddy },
       })
       const rows = result.providers || []
       const failed = rows.filter((r) => r.status === 'error')
@@ -826,11 +911,78 @@ function ProviderSection(props) {
     }
   }
 
+  const startNew = () => { setError(null); setMessage(null); setDraft({ ...EMPTY_PROVIDER }) }
+  // The id is deliberately not editable afterwards: there is no rename path,
+  // and therefore no path that removes one provider to create another.
+  const startEdit = (provider) => {
+    setError(null); setMessage(null)
+    setDraft({
+      id: provider.id,
+      apiKeyEnv: provider.apiKeyEnv || '',
+      apiKey: '',
+      baseURL: provider.baseURL || '',
+      reasoning: provider.reasoning || '',
+      models: (provider.models || []).map((m) => ({ ...m, checked: true })),
+    })
+  }
+
+  const probe = async () => {
+    if (!draft) return
+    setProbing(true); setError(null); setMessage(null)
+    try {
+      const pulled = await api('/provider/probe', { method: 'POST', sessionId, body: { baseURL: draft.baseURL, apiKey: draft.apiKey } })
+      const models = (pulled.models || []).map((m) => ({ ...m, checked: true }))
+      setDraft((prev) => (prev ? { ...prev, models } : prev))
+      setMessage(`网关返回 ${models.length} 个模型，已全部勾选。`)
+    } catch (err) {
+      setError(err.message || String(err))
+    } finally {
+      setProbing(false)
+    }
+  }
+
+  const save = async () => {
+    if (!draft) return
+    setBusy(true); setError(null); setMessage(null)
+    try {
+      const chosen = (draft.models || []).filter((m) => m.checked)
+      const result = await api('/provider/save', {
+        method: 'POST',
+        sessionId,
+        body: {
+          providerId: draft.id.trim(),
+          apiKey: draft.apiKey,
+          provider: { apiKeyEnv: draft.apiKeyEnv, api: 'openai-completions', baseURL: draft.baseURL, reasoning: draft.reasoning, models: chosen },
+        },
+      })
+      setMessage(`${result.created ? '已新增' : '已更新'}供应商 ${result.providerId}（${result.modelCount} 个模型）`
+        + `${result.credentialsWritten ? '，密钥已写入凭据文件' : ''}。重启 DeepSeek Harness 后生效。`)
+      setDraft(null)
+      state.reload()
+      await detect()
+    } catch (err) {
+      setError(err.message || String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const scanned = (scan.data && scan.data.providers) || []
   const scanFor = (id) => scanned.find((r) => r.id === id) || null
   const detailFor = (providerId, modelId) => {
     const row = scanFor(providerId)
     return (row && (row.details || []).find((d) => d.id === modelId)) || null
+  }
+
+  const kindBadge = (id) => {
+    const row = scanFor(id)
+    if (!row) return null
+    if (row.verdict === 'gateway') {
+      const how = row.kindSource === 'model-id-prefix' ? '按模型命名空间' : '按 /healthz'
+      return h('span', { className: 'dsi-badge dsi-badge-on' }, `WorkBuddy${row.service ? ` · ${row.service}` : ''}（${how}）`)
+    }
+    if (row.verdict === 'other') return h('span', { className: 'dsi-badge dsi-badge-off' }, '非 WorkBuddy 网关')
+    return null
   }
 
   const scanBadge = (id) => {
@@ -851,7 +1003,7 @@ function ProviderSection(props) {
   const pending = (scan.data && scan.data.unlockedModels) || 0
   const pendingRows = scanned.reduce((rows, r) => rows.concat((r.details || []).filter((d) => d.status === 'unlocked')), [])
   const narrowedRows = pendingRows.filter((d) => (d.lost || []).length)
-  const skippedRows = scanned.filter((r) => r.verdict === 'skipped')
+  const skippedRows = scanned.filter((r) => r.verdict === 'skipped' || r.verdict === 'other')
 
   return h(Panel, {
     title: '思考解锁',
@@ -859,11 +1011,14 @@ function ProviderSection(props) {
       h('code', null, patchFile || 'profile/cordis.patch.yml'),
       '　按网关形态自动判断：只处理这个 profile 里 ',
       h('code', null, info.entryId || 'llm-pi-ai'),
-      ' 条目下「api: openai-completions + 可达 http(s) 地址 + 凭据就位」的供应商，其余跳过并说明原因；写前自动备份，重启 DSH 后生效。'),
+      ' 条目下真正的 WorkBuddy 网关（先认 ',
+      h('code', null, '/healthz'),
+      ' 里的 service 名称，认不出时看模型 id 是否带 cn:/global: 命名空间），识别结果逐行标注，其余跳过并说明原因；写前自动备份，重启 DSH 后生效。'),
     actions: h(React.Fragment, null,
       h(Button, { variant: 'primary', disabled: busy || scan.loading || !providers.length, onClick: unlockAll },
         pending ? `全部解锁（${pending} 个模型待更新）` : '全部解锁'),
       h(Button, { disabled: busy, onClick: () => { state.reload(); detect() } }, '重新识别'),
+      h(Button, { disabled: busy, onClick: startNew }, '新增网关'),
     ),
     footer: patchFile ? `配置文件：${patchFile}${credentialsFile ? `　密钥文件：${credentialsFile}` : ''}` : null,
   },
@@ -883,8 +1038,20 @@ function ProviderSection(props) {
         + (pendingRows.length > 3 ? ` 等 ${pendingRows.length} 个` : ''))
       : null,
     skippedRows.length
-      ? h('div', { className: 'dsi-hint' }, `跳过 ${skippedRows.length} 个供应商：`
+      ? h('div', { className: 'dsi-hint' }, `${skippedRows.length} 个供应商不参与解锁：`
         + skippedRows.map((r) => `${r.id}（${r.reason || '不适用'}）`).join('；'))
+      : null,
+    providers.length
+      ? h('label', { className: 'dsi-check', style: { marginTop: '6px' } },
+        h('input', { type: 'checkbox', checked: onlyWorkbuddy, onChange: (e) => setOnlyWorkbuddy(e.target.checked) }),
+        h('span', null, '只解锁 WorkBuddy 网关（先看 ', h('code', null, '/healthz'), ' 的 service 名称，再看模型 id 是否都带 ',
+          h('code', null, 'cn:'), ' / ', h('code', null, 'global:'), ' 命名空间；取消勾选才会去改其它网关）'))
+      : null,
+    draft
+      ? h(ProviderEditor, {
+        draft, setDraft, saving: busy, probing, isNew: !providers.some((p) => p.id === draft.id),
+        onCancel: () => setDraft(null), onSave: save, onProbe: probe,
+      })
       : null,
     state.loading && !data ? h(Spinner) : null,
     state.error ? h(Note, { kind: 'error' }, `读取失败：${state.error}`) : null,
@@ -896,6 +1063,7 @@ function ProviderSection(props) {
         h('div', { className: 'dsi-row-main' },
           h('div', { className: 'dsi-row-name' }, provider.id,
             h('span', { className: 'dsi-badge' }, `${provider.modelCount} 模型`),
+            kindBadge(provider.id),
             scanBadge(provider.id),
             provider.apiKeyEnv
               ? h('span', { className: provider.hasCredential ? 'dsi-badge dsi-badge-on' : 'dsi-badge dsi-badge-off' },
@@ -908,10 +1076,11 @@ function ProviderSection(props) {
               provider.reasoning ? `默认思考 ${provider.reasoning}` : null,
               summarizeEfforts(provider.models) || null,
             ].filter(Boolean).join(' · ')),
-          row && row.reason ? h('div', { className: 'dsi-row-meta' }, `${row.verdict === 'skipped' ? '跳过原因' : '探测结果'}：${row.reason}`) : null,
+          row && row.reason ? h('div', { className: 'dsi-row-meta' }, `${(row.verdict === 'skipped' || row.verdict === 'other') ? '未参与原因' : '探测结果'}：${row.reason}`) : null,
         ),
         h('div', { className: 'dsi-toolbar' },
           h(Button, { disabled: busy, onClick: () => setExpanded(open ? null : provider.id) }, open ? '收起模型' : '查看模型'),
+          h(Button, { disabled: busy, onClick: () => startEdit(provider) }, '编辑'),
         ),
         open ? h('div', { className: 'dsi-card', style: { marginTop: '8px' } },
           h('div', { className: 'dsi-hint' }, `${(provider.models || []).length} 个模型（当前写在配置里的思考档位）`),

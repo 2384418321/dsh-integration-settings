@@ -13,7 +13,7 @@
 | **MCP 管理** | 增 / 删 / 改 / 启停 MCP 服务器 | 当前 profile 的 `cordis.patch.yml`（受管区块）+ `.dsh-integration/mcp.json`（真理源） |
 | **Skill 管理** | 浏览 / 新建 / 编辑 / 删除技能 | DSH 全局、共享 `.agents`、Claude / Codex 全局目录，以及当前项目的 `.dsh` / `.agents` / `.claude` 目录 |
 | **全局人设** | 可视化编辑人设文件（等价于 Claude Code 的 `CLAUDE.md`） | `$DSH_HOME/AGENTS.md`（全局）与 `<项目>/AGENTS.md`（当前项目） |
-| **思考解锁** | 打开即自动识别每个网关真正支持的思考档位，一键解锁写回配置 | 当前 profile 的 `cordis.patch.yml`（`llm-pi-ai` 条目的 `config.providers`）+ `$DSH_HOME/.credentials.yaml`（`refs`，只存密钥） |
+| **思考解锁** | 打开即自动识别每个网关真正支持的思考档位，一键解锁写回配置；可新增/编辑网关（不提供删除） | 当前 profile 的 `cordis.patch.yml`（`llm-pi-ai` 条目的 `config.providers`）+ `$DSH_HOME/.credentials.yaml`（`refs`，只存密钥） |
 
 > 这是社区插件，不是 DeepSeek 官方产品。安装前请自行评估，建议先备份 profile 目录。
 
@@ -193,6 +193,13 @@ DSH 的模型供应商由 `@deepseek-ai/dsh-llm-pi-ai` 的 `config.providers` �
   凭据缺失），既不探测也不改写。
 - **只碰这个条目的 `config.providers`**：`- id: llm-pi-ai` 以外的条目一律不读不写。DSH 自带的
   `deepseek-official` / `deepseek-account` 不在这个文件里，插件碰不到。
+- **先认身份，再决定解锁谁**：默认只解锁真正的 WorkBuddy 网关。判据按顺序两条——先看
+  `<origin>/healthz` 返回的 JSON 里 `service` 是否含 `workbuddy`（本机两个网关分别回
+  `workbuddy-manager` 与 `workbuddy2api`，该接口不需要密钥）；认不出时再看 `/v1/models` 的模型 id
+  是否**全部**带 `cn:` / `global:` 命名空间。结果逐行标注在供应商名前：
+  `WorkBuddy · workbuddy2api（按 /healthz）` 或 `非 WorkBuddy 网关`。
+- **其它网关默认不动**：没被认成 WorkBuddy 的供应商列出原因后跳过，配置一字不改。确实要连它们一起
+  解锁时，取消勾选页面上的「只解锁 WorkBuddy 网关」即可。
 - **点「查看模型」**可展开某个供应商的**只读**模型清单，逐个看它当前声明了哪些档位、以及网关要求
   改成什么（含会去掉哪几档）。
 
@@ -220,6 +227,14 @@ DSH 的模型供应商由 `@deepseek-ai/dsh-llm-pi-ai` 的 `config.providers` �
 
 解锁后需**重启 DSH** 才会在模型选择器里看到新档位；重启前可用 `de_models` 核对每个模型是否带上了
 「思考等级」。
+
+### 新增 / 编辑网关
+
+顶部「新增网关」按钮：填 `id` / `baseURL` / `apiKeyEnv` / 密钥 → 「测试连接并拉取模型」→ 勾选要暴露的
+模型 → 保存。写前自动备份；密钥写进 `$DSH_HOME/.credentials.yaml` 的 `refs:`，不进 `cordis.patch.yml`。
+
+已有网关可以「编辑」（改地址、换密钥、增删模型），但 **`id` 建好后不可改**，页面也**不提供删除**：
+误点不会让某个网关从配置里消失。真要删除时手工编辑 `cordis.patch.yml`，或用写前备份恢复。
 
 ## 安全边界
 

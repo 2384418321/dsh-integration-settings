@@ -3,6 +3,27 @@
 本文件的格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.4] - 2026-10-13
+
+思考解锁只认 WorkBuddy 网关，并把「新增 / 编辑网关」加回来（但不提供删除）。
+
+### 新增
+- **按身份识别网关**：默认只解锁真正的 WorkBuddy 网关。先看 `<origin>/healthz` 的 `service` 是否含
+  `workbuddy`（本机两个网关回 `workbuddy-manager` / `workbuddy2api`，无需密钥），认不出时回落到
+  「`/v1/models` 的模型 id 是否全部带 `cn:` / `global:` 命名空间」。识别结果逐行标注，其它网关列出
+  原因后跳过，配置一字不改；页面上可取消勾选「只解锁 WorkBuddy 网关」来放宽。
+- **新增 / 编辑网关**：`POST /provider/save` 回到宿主路由（`/state` 与客户端页同步提供入口）。
+  密钥写进凭据文件的 `refs:`，写前自动备份。
+
+### 变更
+- **没有删除路径**：`/provider/delete` 与 `removeProviderFromPatch` / `removeCredentialRef` 不再导出，
+  供应商 `id` 建好后不可改（不提供改名，因此也不存在「删旧建新」）。误点不会丢网关。
+
+### 测试
+- providers.test.js 新增 7 项：`detectGatewayKind` 的 WorkBuddy / 沉默 / 坏地址三态、`realmNamespaced`
+  的边界、非 WorkBuddy 网关默认不被改写、显式放宽后照常解锁、回落判据、`saveProvider` 新增与就地编辑
+  （另一分组保持原样）。夹具 `stubFetch` 现在同时应答 `/healthz` 与 `/models`。
+
 ## [0.2.3] - 2026-10-13
 
 ### 变更

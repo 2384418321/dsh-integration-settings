@@ -16,7 +16,7 @@ into point-and-click operations:
 | **MCP servers** | add / remove / edit / enable–disable MCP servers | the current profile's `cordis.patch.yml` (managed block) + `.dsh-integration/mcp.json` (source of truth) |
 | **Skills** | browse / create / edit / delete skills | DSH global, shared `.agents`, Claude / Codex global directories, plus the current project's `.dsh` / `.agents` / `.claude` directories |
 | **Global persona** | visually edit the persona file (the equivalent of Claude Code's `CLAUDE.md`) | `$DSH_HOME/AGENTS.md` (global) and `<project>/AGENTS.md` (current project) |
-| **Thinking unlock** | detects each gateway's real thinking levels on page open and unlocks them in one click | the current profile's `cordis.patch.yml` (the `llm-pi-ai` entry's `config.providers`) + `$DSH_HOME/.credentials.yaml` (`refs`, secrets only) |
+| **Thinking unlock** | detects each gateway's real thinking levels on page open and unlocks them in one click; can also add/edit gateways (no delete) | the current profile's `cordis.patch.yml` (the `llm-pi-ai` entry's `config.providers`) + `$DSH_HOME/.credentials.yaml` (`refs`, secrets only) |
 
 > This is a community plugin, not an official DeepSeek product. Evaluate it yourself before
 > installing, and consider backing up your profile directory first.
@@ -170,6 +170,13 @@ by those few dozen lines of YAML. This page does exactly one thing: **auto-detec
   credential missing) and is neither probed nor rewritten.
 - **Only this entry's `config.providers`**: nothing outside `- id: llm-pi-ai` is read or written.
   DSH's built-in `deepseek-official` / `deepseek-account` do not live in this file.
+- **Identity first, then unlocking**: by default only real WorkBuddy gateways are unlocked. Two
+  signals, in order: the JSON at `<origin>/healthz` must name a `service` containing `workbuddy`
+  (this box's two gateways answer `workbuddy-manager` and `workbuddy2api`; the endpoint needs no
+  key); when that is silent, every `/v1/models` id must carry a `cn:` / `global:` namespace. The
+  verdict is labelled per row: `WorkBuddy · workbuddy2api (via /healthz)` or `not a WorkBuddy gateway`.
+- **Other gateways are left alone**: providers that are not identified are listed with the reason and
+  skipped — not a byte is written. To unlock them too, clear the "WorkBuddy gateways only" checkbox.
 - **"Show models"** expands a provider's **read-only** model list, showing what each model currently
   declares and what the gateway wants instead (including which levels would be dropped).
 
@@ -200,6 +207,16 @@ by those few dozen lines of YAML. This page does exactly one thing: **auto-detec
 
 Restart DSH for the new levels to reach the model picker; before restarting you can check each model
 with `de_models`.
+
+### Add / edit a gateway
+
+The "Add gateway" button at the top: fill in `id` / `baseURL` / `apiKeyEnv` / key → "Test and pull
+models" → tick the models to expose → save. A backup is taken first; the key goes into
+`$DSH_HOME/.credentials.yaml`'s `refs:`, never into `cordis.patch.yml`.
+
+Existing gateways can be edited (address, key, model set), but the **`id` is fixed once created** and
+the page offers **no delete**: a stray click cannot make a gateway disappear. To really remove one,
+edit `cordis.patch.yml` by hand or restore the pre-write backup.
 
 ## Security boundary
 

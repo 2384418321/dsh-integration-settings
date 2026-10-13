@@ -389,13 +389,29 @@ refs:
 
 const REASON_LEVELS = { off: null, low: 'low', high: 'high', max: 'max' }
 
-function stubFetch(table) {
+// WorkBuddy gateways identify themselves on /healthz; pass `health: null` to
+// simulate a gateway (or a plain OpenAI endpoint) that stays silent there.
+const WORKBUDDY_HEALTH = { service: 'workbuddy2api', healthy: 8, total: 8 }
+
+function stubFetch(table, health = WORKBUDDY_HEALTH) {
   const seen = []
   const impl = async (url, init) => {
-    seen.push({ url: String(url), authorization: init?.headers?.authorization })
-    return { ok: true, status: 200, json: async () => ({ data: table[String(url)] || [] }) }
+    const key = String(url)
+    seen.push({ url: key, authorization: init?.headers?.authorization })
+    if (/\/healthz$/.test(key)) {
+      if (health === null) return { ok: false, status: 404, json: async () => ({}) }
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: (name) => (String(name).toLowerCase() === 'x-service' ? health.service : null) },
+        json: async () => health,
+      }
+    }
+    return { ok: true, status: 200, json: async () => ({ data: table[key] || [] }) }
   }
   impl.seen = seen
+  impl.modelCalls = () => seen.filter((call) => /\/models$/.test(call.url))
+  impl.kindCalls = () => seen.filter((call) => /\/healthz$/.test(call.url))
   return impl
 }
 
@@ -468,7 +484,7 @@ test('unlockProviderThinking dry run reports the gap without writing', async (t)
   assert.equal(report.providers.find((r) => r.id === 'quiet').status, 'current')
   assert.equal(await fsp.readFile(resolved.patchFile, 'utf8'), before)
   // the probe authenticated with the ref from .credentials.yaml
-  assert.deepEqual(fetchImpl.seen.map((c) => c.authorization), ['Bearer sk-locked', 'Bearer sk-quiet'])
+  assert.deepEqual(fetchImpl.modelCalls().map((c) => c.authorization), ['Bearer sk-locked', 'Bearer sk-quiet'])
 })
 
 test('unlockProviderThinking writes levels, keeps silent models and other providers intact', async (t) => {
@@ -514,6 +530,9 @@ test('unlockProviderThinking reports a failing gateway without skipping the othe
   const fetchImpl = async (url) => {
     if (String(url).startsWith('https://locked.example')) {
       throw new Error('ECONNREFUSED')
+    }
+    if (String(url).endsWith('/healthz')) {
+      return { ok: true, status: 200, headers: { get: () => 'workbuddy2api' }, json: async () => WORKBUDDY_HEALTH }
     }
     return {
       ok: true,
@@ -571,7 +590,7 @@ test('unlockProviderThinking skips a non-gateway provider without probing it', a
   assert.match(quiet.reason, /anthropic-messages/)
   assert.deepEqual(report.gatewayProviders, ['locked'])
   assert.deepEqual(report.skippedProviders, ['quiet'])
-  assert.equal(fetchImpl.seen.length, 1)
+  assert.equal(fetchImpl.modelCalls().length, 1)
 })
 
 test('unlockProviderThinking reports a gateway whose credential is missing instead of failing', async (t) => {
@@ -583,5 +602,120 @@ test('unlockProviderThinking reports a gateway whose credential is missing inste
   assert.equal(locked.verdict, 'skipped')
   assert.match(locked.reason, /LOCKED_KEY/)
   assert.deepEqual(report.gatewayProviders, ['quiet'])
-  assert.equal(fetchImpl.seen.length, 1)
+  assert.equal(fetchImpl.modelCalls().length, 1)
+})
+
+test('unlockProviderThinking leaves a gateway that is not WorkBuddy alone', async (t) => {
+  const { fsp, resolved, env } = await unlockSandbox(t)
+  const before = await fsp.readFile(resolved.patchFile, 'utf8')
+  const fetchImpl = stubFetch(
+    { 'https://locked.example/v1/models': [{ id: 'm-reason', reasoning_supported_efforts: ['high'] }] },
+    { service: 'some-other-proxy' },
+  )
+  const report = await unlockProviderThinking(env, { fetchImpl })
+  const locked = report.providers.find((r) => r.id === 'locked')
+  assert.equal(locked.verdict, 'other')
+  assert.equal(locked.status, 'skipped')
+  assert.match(locked.reason, /some-other-proxy/)
+  assert.deepEqual(report.otherProviders, ['locked'])
+  assert.deepEqual(report.workbuddyProviders, [])
+  assert.equal(report.changed, false)
+  assert.equal(await fsp.readFile(resolved.patchFile, 'utf8'), before)
+})
+
+test('unlockProviderThinking can be widened past the WorkBuddy gate on request', async (t) => {
+  const { fsp, resolved, env } = await unlockSandbox(t)
+  const fetchImpl = stubFetch(
+    { 'https://locked.example/v1/models': [{ id: 'm-reason', reasoning_supported_efforts: ['high'] }] },
+    { service: 'some-other-proxy' },
+  )
+  const report = await unlockProviderThinking(env, { onlyWorkbuddy: false, fetchImpl })
+  assert.equal(report.onlyWorkbuddy, false)
+  assert.deepEqual(report.otherProviders, [])
+  assert.deepEqual(report.workbuddyProviders, ['locked'])
+  assert.ok(report.unlockedModels >= 1)
+  assert.equal(report.changed, true)
+  const after = await fsp.readFile(resolved.patchFile, 'utf8')
+  assert.match(after, new RegExp('high: high'))
+})
+
+test('unlockProviderThinking falls back to the realm-prefixed model ids', async (t) => {
+  const { fsp, resolved, env } = await unlockSandbox(t)
+  const fetchImpl = stubFetch(
+    {
+      'https://locked.example/v1/models': [
+        { id: 'cn:m-reason', reasoning_supported_efforts: ['high'] },
+        { id: 'cn:m-plain' },
+      ],
+    },
+    null,
+  )
+  const report = await unlockProviderThinking(env, { fetchImpl })
+  const locked = report.providers.find((r) => r.id === 'locked')
+  assert.equal(locked.verdict, 'gateway')
+  assert.equal(locked.kindSource, 'model-id-prefix')
+  assert.deepEqual(report.workbuddyProviders, ['locked'])
+  assert.equal(fetchImpl.kindCalls().length, 1)
+})
+
+test('realmNamespaced only accepts a catalog that is fully namespaced', async () => {
+  const { realmNamespaced } = await import('../src/core.js')
+  assert.equal(realmNamespaced([{ id: 'cn:a' }, { id: 'global:b' }]), true)
+  assert.equal(realmNamespaced([{ id: 'cn:a' }, { id: 'plain' }]), false)
+  assert.equal(realmNamespaced([]), false)
+  assert.equal(realmNamespaced(undefined), false)
+})
+
+test('detectGatewayKind reports the service name a WorkBuddy gateway announces', async () => {
+  const { detectGatewayKind } = await import('../src/core.js')
+  const ok = await detectGatewayKind({ baseURL: 'http://192.168.2.202:7863/v1' }, stubFetch({}))
+  assert.deepEqual(ok, { kind: 'workbuddy', service: 'workbuddy2api', source: 'healthz' })
+  const silent = await detectGatewayKind({ baseURL: 'http://192.168.2.202:7863/v1' }, stubFetch({}, null))
+  assert.equal(silent.kind, 'unknown')
+  assert.match(silent.reason, /healthz/)
+  const junk = await detectGatewayKind({ baseURL: 'not a url' }, stubFetch({}))
+  assert.equal(junk.kind, 'unknown')
+})
+
+test('saveProvider adds a provider and never touches the ones already there', async (t) => {
+  const { saveProvider, readProvidersFromPatch } = await import('../src/core.js')
+  const { fsp, resolved, env } = await unlockSandbox(t)
+  const report = await saveProvider(env, {
+    providerId: 'fresh',
+    apiKey: 'sk-fresh',
+    provider: {
+      apiKeyEnv: 'FRESH_KEY',
+      api: 'openai-completions',
+      baseURL: 'http://10.0.0.9:8000/v1',
+      models: [{ id: 'cn:auto', name: 'Auto', checked: true }],
+    },
+  })
+  assert.equal(report.created, true)
+  assert.equal(report.modelCount, 1)
+  assert.equal(report.credentialsWritten, true)
+  const patch = await fsp.readFile(resolved.patchFile, 'utf8')
+  const names = Object.keys(readProvidersFromPatch(patch).providers).sort()
+  assert.deepEqual(names, ['fresh', 'locked', 'quiet'])
+  assert.match(await fsp.readFile(resolved.credentialsFile, 'utf8'), /FRESH_KEY: sk-fresh/)
+  assert.match(await fsp.readFile(resolved.credentialsFile, 'utf8'), /records:\n  keep-me: untouched/)
+})
+
+test('saveProvider edits in place so a provider id can never be removed', async (t) => {
+  const { saveProvider, readProvidersFromPatch } = await import('../src/core.js')
+  const { fsp, resolved, env } = await unlockSandbox(t)
+  const report = await saveProvider(env, {
+    providerId: 'locked',
+    provider: {
+      apiKeyEnv: 'LOCKED_KEY',
+      api: 'openai-completions',
+      baseURL: 'https://locked.example/v2',
+      models: [{ id: 'm-reason', name: 'Reasoner', checked: true }],
+    },
+  })
+  assert.equal(report.created, false)
+  const patch = await fsp.readFile(resolved.patchFile, 'utf8')
+  const providers = readProvidersFromPatch(patch).providers
+  assert.deepEqual(Object.keys(providers).sort(), ['locked', 'quiet'])
+  assert.equal(providers.locked.baseURL, 'https://locked.example/v2')
+  assert.equal(providers.quiet.models.length, 1)
 })

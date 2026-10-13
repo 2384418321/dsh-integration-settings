@@ -20,6 +20,7 @@ import {
   readPersonaBackup,
   savePersona,
   readProviderState,
+  saveProvider,
   unlockProviderThinking,
   httpError,
 } from './core.js'
@@ -286,8 +287,20 @@ async function handle(ctx, req, res) {
       return json(res, 200, { ok: true, data: await readProviderState(process.env) })
     // Read-only list + the unlock pass. Provider add/edit/delete is deliberately
     // not exposed: this page detects gateways and unlocks thinking, nothing else.
-    case 'POST /provider/unlock':
-      return json(res, 200, { ok: true, data: await unlockProviderThinking(process.env, body || {}) })
+    case 'POST /provider/save':
+      return json(res, 200, { ok: true, data: await saveProvider(process.env, body || {}) })
+    case 'POST /provider/unlock': {
+      const input = body || {}
+      return json(res, 200, {
+        ok: true,
+        data: await unlockProviderThinking(process.env, {
+          providerIds: input.providerIds,
+          dryRun: !!input.dryRun,
+          // WorkBuddy gateways only, unless the caller explicitly widens it.
+          onlyWorkbuddy: input.onlyWorkbuddy !== false,
+        }),
+      })
+    }
     default:
       return json(res, 404, { ok: false, code: 'error.proto.notFound', error: `未知接口：${req.method} ${route}` })
   }
