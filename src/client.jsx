@@ -15,6 +15,8 @@ const ZH = {
   'skills.desc': '可视化浏览、编辑、新建技能文件（SKILL.md）',
   'persona.title': '全局人设',
   'persona.desc': '可视化编辑 DSH 的全局人设文件 AGENTS.md',
+  'providers.title': '模型供应商',
+  'providers.desc': '可视化新增 OpenAI 兼容网关供应商，自动拉取模型列表与思考档位',
 }
 const EN = {
   'group.title': 'Integrations',
@@ -24,6 +26,8 @@ const EN = {
   'skills.desc': 'Browse, edit and create SKILL.md files',
   'persona.title': 'Global persona',
   'persona.desc': "Edit DSH's global persona file AGENTS.md",
+  'providers.title': 'Model providers',
+  'providers.desc': 'Add OpenAI-compatible gateways and pull their model list and thinking levels',
 }
 
 function makeT(ctx) {
@@ -717,14 +721,236 @@ function PersonaSection(props) {
   )
 }
 
+/* --------------------------------------------------------------- providers */
+
+const EMPTY_PROVIDER = {
+  previousId: null, id: '', apiKeyEnv: '', apiKey: '', baseURL: '', reasoning: '', models: [],
+}
+const LEVEL_ORDER = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+
+function suggestEnvName(id) {
+  const base = String(id || '').toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
+  return base ? `${base}_API_KEY` : ''
+}
+
+function ProviderEditor({ draft, setDraft, saving, probing, isNew, onCancel, onSave, onProbe }) {
+  const patch = (part) => setDraft((prev) => ({ ...prev, ...part }))
+  const models = draft.models || []
+  const chosen = models.filter((m) => m.checked)
+  const levels = []
+  for (const model of chosen) {
+    for (const level of Object.keys(model.reasoningEfforts || {})) if (!levels.includes(level)) levels.push(level)
+  }
+  levels.sort((a, b) => LEVEL_ORDER.indexOf(a) - LEVEL_ORDER.indexOf(b))
+  const toggle = (id, checked) => patch({ models: models.map((m) => (m.id === id ? { ...m, checked } : m)) })
+  const setAll = (checked) => patch({ models: models.map((m) => ({ ...m, checked })) })
+
+  return h('div', { className: 'dsi-card' },
+    h('div', { className: 'dsi-inline' },
+      h('strong', { style: { fontSize: 13 } }, isNew ? '新增供应商' : `编辑：${draft.id}`),
+      h('span', { className: 'dsi-badge' }, `${chosen.length}/${models.length} 个模型已勾选`),
+    ),
+    h('div', { className: 'dsi-grid2' },
+      h(Field, { label: 'id', hint: '1–32 位字母/数字/点/下划线/连字符；会出现在模型选择器里' },
+        h(Text, {
+          value: draft.id, mono: true, placeholder: 'workbudy-lan', disabled: !isNew,
+          onChange: (v) => patch({ id: v, apiKeyEnv: !draft.apiKeyEnv ? suggestEnvName(v) : draft.apiKeyEnv }),
+        }),
+      ),
+      h(Field, { label: 'baseURL', hint: 'OpenAI 兼容根地址，通常以 /v1 结尾' },
+        h(Text, { value: draft.baseURL, mono: true, placeholder: 'http://192.168.2.202:7863/v1', onChange: (v) => patch({ baseURL: v }) }),
+      ),
+      h(Field, { label: 'apiKeyEnv', hint: '密钥在凭据文件里的引用名；密钥本身不会写进 cordis.patch.yml' },
+        h(Text, { value: draft.apiKeyEnv, mono: true, placeholder: 'WORKBUDY_LAN_API_KEY', onChange: (v) => patch({ apiKeyEnv: v }) }),
+      ),
+      h(Field, { label: 'apiKey', hint: isNew ? '粘贴网关密钥，保存时写入凭据文件' : '留空表示不改动已保存的密钥' },
+        h('input', {
+          className: 'dsi-input dsi-mono', type: 'password', autoComplete: 'off', placeholder: 'sk-…',
+          value: draft.apiKey, onChange: (e) => patch({ apiKey: e.target.value }),
+        }),
+      ),
+    ),
+    h('div', { className: 'dsi-inline' },
+      h(Button, { disabled: probing || saving || !draft.baseURL, onClick: onProbe }, probing ? '正在连接…' : '测试连接并拉取模型'),
+      models.length ? h(Button, { disabled: saving, onClick: () => setAll(true) }, '全选') : null,
+      models.length ? h(Button, { disabled: saving, onClick: () => setAll(false) }, '全不选') : null,
+    ),
+    models.length
+      ? h('div', { style: { maxHeight: 300, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 4 } },
+        models.map((model) => h('label', {
+          key: model.id, className: 'dsi-check',
+          style: { padding: '5px 7px', borderRadius: 7, background: 'color-mix(in srgb, currentColor 4%, transparent)' },
+        },
+          h('input', { type: 'checkbox', checked: !!model.checked, onChange: (e) => toggle(model.id, e.target.checked) }),
+          h('span', { className: 'dsi-mono', style: { fontSize: 11.5 } }, model.id),
+          model.name && model.name !== model.id ? h('span', { style: { opacity: 0.6, fontSize: 11 } }, model.name) : null,
+          h('span', { style: { opacity: 0.45, fontSize: 10.5, marginLeft: 'auto', whiteSpace: 'nowrap' } },
+            [
+              model.contextWindow ? `ctx ${model.contextWindow}` : null,
+              model.maxTokens ? `max ${model.maxTokens}` : null,
+              model.reasoningEfforts ? `思考 ${Object.keys(model.reasoningEfforts).join('/')}` : null,
+            ].filter(Boolean).join(' · ')),
+        )),
+      )
+      : h('div', { className: 'dsi-hint' }, '还没有模型列表：填好 baseURL（和密钥）后点「测试连接并拉取模型」。'),
+    levels.length
+      ? h(Field, { label: '默认思考档位（可选）', hint: '新对话的默认推理强度；只列出所选模型共同支持的档位' },
+        h('select', { className: 'dsi-select', value: draft.reasoning, onChange: (e) => patch({ reasoning: e.target.value }) },
+          h('option', { value: '' }, '不指定（用模型自带的默认档）'),
+          levels.map((level) => h('option', { key: level, value: level }, level)),
+        ),
+      )
+      : null,
+    h('div', { className: 'dsi-inline' },
+      h(Button, { variant: 'primary', disabled: saving || !chosen.length, onClick: onSave }, saving ? '保存中…' : '保存'),
+      h(Button, { disabled: saving, onClick: onCancel }, '取消'),
+    ),
+  )
+}
+
+function ProviderSection(props) {
+  const sessionId = sessionIdOf(props)
+  logSeat('settings.section', props)
+  const [draft, setDraft] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [probing, setProbing] = useState(false)
+  const [message, setMessage] = useState(null)
+  const [error, setError] = useState(null)
+  const state = useAsync(() => api(`/state?session=${encodeURIComponent(sessionId || '')}&root=`, { sessionId }), [sessionId])
+  const data = state.data
+  const info = (data && data.providers) || {}
+  const providers = info.providers || []
+  const patchFile = info.patchFile || (data && data.paths && data.paths.patchFile) || ''
+  const credentialsFile = info.credentialsFile || ''
+
+  const run = async (fn, okText) => {
+    setBusy(true); setError(null); setMessage(null)
+    try {
+      await fn()
+      setMessage(okText)
+      state.reload()
+    } catch (err) {
+      setError(err.message || String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const startNew = () => { setError(null); setMessage(null); setDraft({ ...EMPTY_PROVIDER, models: [] }) }
+
+  const startEdit = (provider) => {
+    setError(null); setMessage(null)
+    setDraft({
+      previousId: provider.id,
+      id: provider.id,
+      apiKeyEnv: provider.apiKeyEnv,
+      apiKey: '',
+      baseURL: provider.baseURL,
+      reasoning: provider.reasoning || '',
+      models: (provider.models || []).map((m) => ({ ...m, checked: true })),
+    })
+  }
+
+  const probe = async () => {
+    setProbing(true); setError(null); setMessage(null)
+    try {
+      const result = await api('/provider/probe', { method: 'POST', sessionId, body: { baseURL: draft.baseURL, apiKey: draft.apiKey } })
+      const models = (result && result.models) || []
+      setDraft((prev) => (prev ? { ...prev, baseURL: (result && result.baseURL) || prev.baseURL, reasoning: '', models: models.map((m) => ({ ...m, checked: true })) } : prev))
+      setMessage(`网关可用：拉到 ${models.length} 个模型，已全部勾选`)
+    } catch (err) {
+      setError(err.message || String(err))
+    } finally {
+      setProbing(false)
+    }
+  }
+
+  const save = () => run(async () => {
+    const models = (draft.models || []).filter((m) => m.checked).map(({ checked, ...rest }) => rest)
+    if (!models.length) throw new Error('至少勾选一个模型（先点「测试连接并拉取模型」）')
+    await api('/provider/save', {
+      method: 'POST',
+      sessionId,
+      body: {
+        providerId: draft.id.trim(),
+        previousId: draft.previousId,
+        apiKey: draft.apiKey.trim() || undefined,
+        provider: {
+          apiKeyEnv: draft.apiKeyEnv.trim(),
+          api: 'openai-completions',
+          baseURL: draft.baseURL.trim(),
+          reasoning: draft.reasoning || undefined,
+          models,
+        },
+      },
+    })
+    setDraft(null)
+  }, '已保存。要重启 DeepSeek Harness 后新供应商才会出现在模型选择器里。')
+
+  const remove = (provider) => {
+    const ok = window.confirm(`删除供应商 ${provider.id}？\n\n配置会从 cordis.patch.yml 移除；密钥引用 ${provider.apiKeyEnv || '(无)'} 在没有其他供应商使用时会一并删除。\n\n需重启 DSH 生效。`)
+    if (!ok) return
+    run(
+      () => api('/provider/delete', { method: 'POST', sessionId, body: { providerId: provider.id, dropCredential: true } }),
+      `已删除 ${provider.id}，重启后生效`,
+    )
+  }
+
+  const actions = h(React.Fragment, null,
+    h(Button, { variant: 'primary', disabled: !!draft || busy, onClick: startNew }, '新增供应商'),
+    h(Button, { disabled: busy, onClick: state.reload }, '刷新'),
+  )
+
+  return h(Panel, {
+    title: '模型供应商',
+    desc: h('span', null, '增删改 OpenAI 兼容网关，自动拉取模型与思考档位，写入 ',
+      h('code', null, patchFile || 'profile/cordis.patch.yml'), ' 与 ',
+      h('code', null, credentialsFile || '~/.dsh/.credentials.yaml'), '　（保存后需重启 DSH 生效）'),
+    actions,
+    footer: patchFile ? `配置文件：${patchFile}${credentialsFile ? `　密钥文件：${credentialsFile}` : ''}` : null,
+  },
+    h(Styles),
+    h(Note, { kind: 'error' }, error),
+    h(Note, { kind: 'ok' }, message),
+    state.loading && !data ? h(Spinner) : null,
+    state.error ? h(Note, { kind: 'error' }, `读取失败：${state.error}`) : null,
+    data && info.entryFound === false
+      ? h('div', { className: 'dsi-note', style: { background: 'color-mix(in srgb, #f5a524 18%, transparent)' } },
+        `这个 profile 的 cordis.patch.yml 里没有 - id: ${info.entryId || 'llm-pi-ai'} 条目：保存时会新建一个。若之后出现重复同名条目，请用 dev_fix_patch 去重，不要手改。`)
+      : null,
+    draft ? h(ProviderEditor, {
+      draft, setDraft, saving: busy, probing, isNew: !draft.previousId,
+      onCancel: () => setDraft(null), onSave: save, onProbe: probe,
+    }) : null,
+    !providers.length && !state.loading ? h('div', { className: 'dsi-empty' }, '这个 profile 还没有可视化纳管的供应商。点「新增供应商」开始。') : null,
+    providers.map((provider) => h('div', { className: 'dsi-row', key: provider.id },
+      h('div', { className: 'dsi-row-main' },
+        h('div', { className: 'dsi-row-name' }, provider.id,
+          h('span', { className: 'dsi-badge' }, `${provider.modelCount} 模型`),
+          provider.apiKeyEnv
+            ? h('span', { className: provider.hasCredential ? 'dsi-badge dsi-badge-on' : 'dsi-badge dsi-badge-off' },
+              provider.hasCredential ? '密钥已配置' : '缺少密钥')
+            : null),
+        h('div', { className: 'dsi-row-meta' },
+          `${provider.baseURL || '(未设置 baseURL)'} · ${provider.apiKeyEnv || '(未设置 apiKeyEnv)'}${provider.reasoning ? ` · 默认思考 ${provider.reasoning}` : ''}`),
+      ),
+      h('div', { className: 'dsi-toolbar' },
+        h(Button, { disabled: busy || !!draft, onClick: () => startEdit(provider) }, '编辑'),
+        h(Button, { variant: 'danger', disabled: busy || !!draft, onClick: () => remove(provider) }, '删除'),
+      ),
+    )),
+  )
+}
+
 /* ------------------------------------------------------------- registration */
 
 export function apply(ctx) {
   const t = makeT(ctx)
   const sections = [
-    { id: 'integration-mcp', order: 61, label: t('mcp.title'), Component: McpSection },
-    { id: 'integration-skills', order: 62, label: t('skills.title'), Component: SkillSection },
-    { id: 'integration-persona', order: 63, label: t('persona.title'), Component: PersonaSection },
+    { id: 'integration-mcp', order: 61, labelKey: 'mcp.title', Component: McpSection },
+    { id: 'integration-skills', order: 62, labelKey: 'skills.title', Component: SkillSection },
+    { id: 'integration-persona', order: 63, labelKey: 'persona.title', Component: PersonaSection },
+    { id: 'integration-providers', order: 64, labelKey: 'providers.title', Component: ProviderSection },
   ]
   for (const section of sections) {
     ctx.effect(() =>
@@ -734,7 +960,7 @@ export function apply(ctx) {
             name: 'settings.section',
             id: section.id,
             order: section.order,
-            label: () => t(section.id === 'integration-mcp' ? 'mcp.title' : section.id === 'integration-skills' ? 'skills.title' : 'persona.title'),
+            label: () => t(section.labelKey),
             locale: NS,
           },
           section.Component,

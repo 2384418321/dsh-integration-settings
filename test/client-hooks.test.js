@@ -58,7 +58,7 @@ function loadPlugin(react) {
     },
   }
   exported.apply(ctx)
-  assert.equal(sections.length, 3, 'three settings sections register')
+  assert.equal(sections.length, 4, 'four settings sections register')
   return sections
 }
 

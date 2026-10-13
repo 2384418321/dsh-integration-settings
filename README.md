@@ -6,13 +6,14 @@
 
 **简体中文** | [English](README.en.md)
 
-给 DeepSeek Harness（DSH）**设置**里补上三个可视化菜单，把三件平时只能手改文件的事变成点选操作：
+给 DeepSeek Harness（DSH）**设置**里补上四个可视化菜单，把四件平时只能手改文件的事变成点选操作：
 
 | 设置菜单 | 管什么 | 背后落盘位置 |
 | --- | --- | --- |
 | **MCP 管理** | 增 / 删 / 改 / 启停 MCP 服务器 | 当前 profile 的 `cordis.patch.yml`（受管区块）+ `.dsh-integration/mcp.json`（真理源） |
 | **Skill 管理** | 浏览 / 新建 / 编辑 / 删除技能 | DSH 全局、共享 `.agents`、Claude / Codex 全局目录，以及当前项目的 `.dsh` / `.agents` / `.claude` 目录 |
 | **全局人设** | 可视化编辑人设文件（等价于 Claude Code 的 `CLAUDE.md`） | `$DSH_HOME/AGENTS.md`（全局）与 `<项目>/AGENTS.md`（当前项目） |
+| **模型供应商** | 新增 / 编辑 / 删除 OpenAI 兼容网关，自动拉模型列表与思考档位 | 当前 profile 的 `cordis.patch.yml`（`llm-pi-ai` 条目的 `config.providers`）+ `$DSH_HOME/.credentials.yaml`（`refs`，只存密钥） |
 
 > 这是社区插件，不是 DeepSeek 官方产品。安装前请自行评估，建议先备份 profile 目录。
 
@@ -76,7 +77,7 @@ DSH="/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh"
 
 ### 安装完成后怎么确认
 
-1. DSH 重启后，**设置**（Settings）左栏底部出现三项：`MCP 管理 / Skill 管理 / 全局人设`。
+1. DSH 重启后，**设置**（Settings）左栏底部出现四项：`MCP 管理 / Skill 管理 / 全局人设 / 模型供应商`。
 2. 打开「MCP 管理」，页面上方的 **profile 徽标**应显示你要操作的那个 profile 名；
    多 profile 场景下先核对徽标，再动手改。
 3. 已有 MCP 服务器应被列出；`cordis.patch.yml` 里手写但未被纳管的行会以横幅提示，可一键导入。
@@ -173,6 +174,27 @@ DSH 的 `@deepseek-ai/dsh-agent-instructions` 插件会在每个会话的首个�
 `$DSH_HOME/AGENTS.md`（就是你的人设）+ 项目链（项目根 → 会话 cwd 的 `AGENTS.md`/`CLAUDE.md`
 以及 `AGENTS.local.md`/`CLAUDE.local.md`）。本页就是这份全局文件的编辑器，并列出最近 3 份备份
 供一键载回。
+
+### 模型供应商
+DSH 的模型供应商由 `@deepseek-ai/dsh-llm-pi-ai` 的 `config.providers` 决定，写在各 profile 的
+`cordis.patch.yml` 里。本页把这件事变成表单：填 `id / baseURL / apiKeyEnv / apiKey` → 点
+「测试连接并拉取模型」读网关的 `GET /models` → 勾选要暴露的模型 → 保存。
+
+几个关键设计（都不是随意选择）：
+
+- **只改进已有的 `- id: llm-pi-ai` 条目**，不新建第二个同名条目——cordis 的同 id 条目会让 DSH
+  启动直接失败（去重得用 `dev_fix_patch`）。找不到该条目时页面会黄条提示。
+- **走 YAML 文档树改写**（解析成 document 改节点再序列化），不是 `parse → JS → stringify`，
+  这样文件里的注释和其它条目的内容都原样保留。
+- **密钥不写进 patch**：`apiKeyEnv` 只是引用名，密钥本体写到 `$DSH_HOME/.credentials.yaml` 的
+  `refs:` 段。页面上的 apiKey 输入框只在「新增」或「想换密钥」时填，留空就不动既有密钥。
+- **思考档位自动映射**：网关 `GET /models` 返回的 `reasoning_supported_efforts` 会转成 pi-ai 的
+  `reasoningEfforts` 字典。注意 `off` 必须写成带引号的 `"off":`——YAML 1.1 会把裸 `off:` 解析成
+  布尔 `false`，档位字典的键类型就错了。
+- 保存/删除都会写 `.bak-<时间戳>` 备份（各保留最近 3 份），两个文件权限都按 `0600` 写。
+
+改完需**重启 DSH** 才会在模型选择器里出现；重启前可用 `de_models` 核对每个模型是否带上了
+「思考等级」。
 
 ## 安全边界
 

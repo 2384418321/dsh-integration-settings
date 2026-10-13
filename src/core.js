@@ -120,6 +120,7 @@ export function paths(env = process.env, ctx = hostContext) {
     stateDir: path.join(profileDir, '.dsh-integration'),
     mcpFile: path.join(profileDir, '.dsh-integration', 'mcp.json'),
     personaFile: path.join(home, 'AGENTS.md'),
+    credentialsFile: path.join(home, '.credentials.yaml'),
   }
 }
 
@@ -608,4 +609,455 @@ export async function savePersona(env = process.env, { scope = 'global', cwd = n
   else await ensureDir(path.dirname(target.path))
   await writeWithBackup(target.path, content, 0o644, 3)
   return { path: target.path, bytes: Buffer.byteLength(content, 'utf8') }
+}
+
+/* --------------------------------------------------------------- providers */
+
+// Model providers live *inside* the profile's existing `- id: llm-pi-ai` entry,
+// under `config.providers`. We deliberately never add a second entry with the
+// same id: the cordis loader rejects duplicate entry ids at boot, so a new
+// provider has to be merged into the entry that is already there.
+export const PROVIDERS_ENTRY_ID = 'llm-pi-ai'
+export const PROVIDERS_PACKAGE = '@deepseek-ai/dsh-llm-pi-ai'
+export const PROVIDER_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/
+export const ENV_NAME_RE = /^[A-Z][A-Z0-9_]{1,63}$/
+export const PROBE_TIMEOUT_MS = 15000
+/** Level ids understood by @deepseek-ai/dsh-llm-pi-ai, ascending. */
+export const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+
+export function validateProviderId(value) {
+  const id = String(value ?? '').trim()
+  if (!PROVIDER_ID_RE.test(id)) {
+    throw httpError(
+      400,
+      'error.provider.id',
+      '供应商 id 需为 1–32 位字母、数字、点、下划线或连字符，并以字母或数字开头（如 workbudy-lan）',
+    )
+  }
+  return id
+}
+
+export function normalizeBaseURL(value) {
+  const raw = String(value ?? '').trim()
+  if (!raw) throw httpError(400, 'error.provider.baseURL', 'baseURL 不能为空')
+  let url
+  try {
+    url = new URL(raw)
+  } catch {
+    throw httpError(400, 'error.provider.baseURL', `baseURL 不是合法 URL：${raw}`)
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw httpError(400, 'error.provider.baseURL', 'baseURL 只支持 http / https')
+  }
+  return url.toString().replace(/\/+$/, '')
+}
+
+/**
+ * Turn gateway-declared effort levels into a pi-ai `reasoningEfforts` map.
+ * A declared level is selectable; every level left out is pinned to "unsupported",
+ * so we only declare what the gateway really accepts.
+ */
+export function buildEffortMap(levels) {
+  const map = {}
+  for (const raw of Array.isArray(levels) ? levels : []) {
+    const level = String(raw ?? '').trim()
+    if (!THINKING_LEVELS.includes(level)) continue
+    // `off` is the one level that must carry *no* wire value: a declared but
+    // empty `off` means "supported, dispatch nothing", i.e. thinking disabled.
+    map[level] = level === 'off' ? null : level
+  }
+  return Object.keys(map).length ? map : null
+}
+
+/** Map one `/v1/models` row onto a pi-ai `models[]` entry. */
+export function normalizeGatewayModel(raw) {
+  const id = String(raw?.id ?? '').trim()
+  if (!id) return null
+  const model = { id, name: String(raw?.name ?? raw?.display_name ?? '').trim() || id }
+  const contextWindow = Number(raw?.context_length ?? raw?.context_window)
+  if (Number.isFinite(contextWindow) && contextWindow > 0) model.contextWindow = Math.trunc(contextWindow)
+  const maxTokens = Number(raw?.max_output_tokens ?? raw?.max_tokens)
+  if (Number.isFinite(maxTokens) && maxTokens > 0) model.maxTokens = Math.trunc(maxTokens)
+  const input = ['text']
+  if (raw?.supports_images === true || raw?.supports_vision === true) input.push('image')
+  model.input = input
+  const levels = Array.isArray(raw?.reasoning_supported_efforts)
+    ? raw.reasoning_supported_efforts.map((v) => String(v ?? '').trim()).filter(Boolean)
+    : []
+  if (raw?.can_disable_thinking === true) levels.unshift('off')
+  const efforts = raw?.supports_reasoning === true || levels.length ? buildEffortMap(levels) : null
+  if (efforts) model.reasoningEfforts = efforts
+  const fallback = String(raw?.reasoning_default_effort ?? '').trim()
+  if (efforts && fallback && Object.prototype.hasOwnProperty.call(efforts, fallback)) {
+    model.reasoning = fallback
+  }
+  return model
+}
+
+/** Host-side `GET <baseURL>/models` probe; never runs in the browser. */
+export async function probeGateway({ baseURL, apiKey } = {}, fetchImpl) {
+  const doFetch = fetchImpl ?? globalThis.fetch
+  if (typeof doFetch !== 'function') throw httpError(500, 'error.provider.fetch', '当前运行时不支持 fetch')
+  const base = normalizeBaseURL(baseURL)
+  const headers = { accept: 'application/json' }
+  const key = String(apiKey ?? '').trim()
+  if (key) headers.authorization = `Bearer ${key}`
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS)
+  let res
+  try {
+    res = await doFetch(`${base}/models`, { headers, signal: controller.signal, redirect: 'follow' })
+  } catch (err) {
+    const reason =
+      err?.name === 'AbortError' ? `超过 ${PROBE_TIMEOUT_MS / 1000} 秒未响应` : String(err?.message ?? err)
+    throw httpError(502, 'error.provider.probe', `连接网关失败：${reason}`)
+  } finally {
+    clearTimeout(timer)
+  }
+  if (!res.ok) {
+    const hint = res.status === 401 || res.status === 403 ? '（API Key 可能不正确）' : ''
+    throw httpError(502, 'error.provider.probe', `网关 /models 返回 HTTP ${res.status}${hint}`)
+  }
+  let payload
+  try {
+    payload = await res.json()
+  } catch {
+    throw httpError(502, 'error.provider.probe', '网关 /models 返回的不是 JSON')
+  }
+  const rows = Array.isArray(payload?.data) ? payload.data : Array.isArray(payload) ? payload : []
+  const models = rows.map(normalizeGatewayModel).filter(Boolean)
+  if (!models.length) throw httpError(502, 'error.provider.probe', '网关没有返回任何可用模型')
+  return { baseURL: base, models }
+}
+
+/* --- cordis.patch.yml surgery -------------------------------------------- */
+//
+// The patch is rewritten through a YAML *document*, not through
+// parse -> mutate -> stringify of plain JS: round-tripping the document keeps
+// comments and the cordis-only `!!js` tags intact, while other entries are left
+// as untouched nodes.
+
+function parseYamlDocument(text, what) {
+  let doc
+  try {
+    doc = YAML.parseDocument(text || '', { logLevel: 'silent' })
+  } catch (err) {
+    throw httpError(500, 'error.patch.yaml', `解析${what}失败：${err.message}`)
+  }
+  if (!doc || doc.errors?.length) {
+    throw httpError(500, 'error.patch.yaml', `${what}不是合法 YAML：${doc?.errors?.[0]?.message ?? ''}`)
+  }
+  return doc
+}
+
+function findEntry(doc, id) {
+  if (!YAML.isSeq(doc.contents)) return null
+  for (const item of doc.contents.items) {
+    if (!YAML.isMap(item)) continue
+    if (String(nodeToJs(item.get('id', true)) ?? '') === id) return item
+  }
+  return null
+}
+
+/**
+ * Force a double-quoted `off` key. `off` is a YAML 1.1 boolean (on/off/yes/no),
+ * so a bare `off:` is read as the boolean false by Ruby/Psych and other 1.1
+ * parsers — quoting keeps the level id a plain string everywhere.
+ */
+function quoteAmbiguousKeys(node) {
+  if (YAML.isMap(node)) {
+    for (const pair of node.items) {
+      if (YAML.isScalar(pair.key) && String(pair.key.value) === 'off') pair.key.type = 'QUOTE_DOUBLE'
+      quoteAmbiguousKeys(pair.value)
+    }
+    return
+  }
+  if (YAML.isSeq(node)) {
+    for (const item of node.items) quoteAmbiguousKeys(item)
+  }
+}
+
+function providerMapFor(doc, entry) {
+  let config = entry.get('config', true)
+  if (config !== undefined && !YAML.isMap(config)) {
+    throw httpError(409, 'error.provider.shape', `条目 ${PROVIDERS_ENTRY_ID} 的 config 不是映射，已中止以免破坏现有配置`)
+  }
+  if (!YAML.isMap(config)) {
+    config = doc.createNode({})
+    entry.set('config', config)
+  }
+  let providers = config.get('providers', true)
+  if (providers !== undefined && !YAML.isMap(providers)) {
+    throw httpError(
+      409,
+      'error.provider.shape',
+      `条目 ${PROVIDERS_ENTRY_ID} 的 config.providers 不是映射，已中止以免破坏现有配置`,
+    )
+  }
+  if (!YAML.isMap(providers)) {
+    providers = doc.createNode({})
+    config.set('providers', providers)
+  }
+  return providers
+}
+
+function newEntryDocument(providerId, providerConfig) {
+  const doc = new YAML.Document()
+  doc.contents = doc.createNode([
+    { id: PROVIDERS_ENTRY_ID, name: PROVIDERS_PACKAGE, config: { providers: { [providerId]: providerConfig } } },
+  ])
+  return doc
+}
+
+/**
+ * `"off": null` and `"off":` are the same YAML, but the empty form is the one the
+ * pi-ai docs use for "thinking can be switched off, dispatch no wire value".
+ */
+function stringifyPatch(doc) {
+  return YAML.stringify(doc, { lineWidth: 0 }).replace(/"off": null/g, '"off":')
+}
+
+export function validateModel(input) {
+  const id = String(input?.id ?? '').trim()
+  if (!id) throw httpError(400, 'error.provider.model', '模型 id 不能为空')
+  const model = { id, name: String(input?.name ?? '').trim() || id }
+  const contextWindow = Number(input?.contextWindow)
+  if (Number.isFinite(contextWindow) && contextWindow > 0) model.contextWindow = Math.trunc(contextWindow)
+  const maxTokens = Number(input?.maxTokens)
+  if (Number.isFinite(maxTokens) && maxTokens > 0) model.maxTokens = Math.trunc(maxTokens)
+  const kinds = (Array.isArray(input?.input) ? input.input : ['text']).map((v) => String(v))
+  model.input = kinds.filter((v) => v === 'text' || v === 'image')
+  if (!model.input.length) model.input = ['text']
+  const raw = input?.reasoningEfforts
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    const efforts = {}
+    for (const level of THINKING_LEVELS) {
+      if (!Object.prototype.hasOwnProperty.call(raw, level)) continue
+      efforts[level] = level === 'off' ? null : String(raw[level] ?? '')
+    }
+    if (Object.keys(efforts).length) model.reasoningEfforts = efforts
+  }
+  const reasoning = String(input?.reasoning ?? '').trim()
+  if (reasoning && THINKING_LEVELS.includes(reasoning)) model.reasoning = reasoning
+  return model
+}
+
+export function renderProviderConfig(draft) {
+  const apiKeyEnv = String(draft?.apiKeyEnv ?? '').trim()
+  if (!ENV_NAME_RE.test(apiKeyEnv)) {
+    throw httpError(400, 'error.provider.env', 'apiKeyEnv 需为全大写字母/数字/下划线，例如 WORKBUDY_LAN_API_KEY')
+  }
+  const models = Array.isArray(draft?.models) ? draft.models : []
+  if (!models.length) throw httpError(400, 'error.provider.models', '至少需要保留一个模型')
+  const reasoning = String(draft?.reasoning ?? '').trim()
+  if (reasoning && !THINKING_LEVELS.includes(reasoning)) {
+    throw httpError(400, 'error.provider.reasoning', `未知的默认思考档位：${reasoning}`)
+  }
+  const provider = {
+    apiKeyEnv,
+    api: String(draft?.api ?? '').trim() || 'openai-completions',
+    baseURL: normalizeBaseURL(draft?.baseURL),
+    models: models.map(validateModel),
+  }
+  if (reasoning) provider.reasoning = reasoning
+  return provider
+}
+
+export function readProvidersFromPatch(patchText) {
+  let doc
+  try {
+    doc = parseYamlDocument(patchText, '配置文件')
+  } catch {
+    return { entryFound: false, providers: {} }
+  }
+  const entry = findEntry(doc, PROVIDERS_ENTRY_ID)
+  if (!entry) return { entryFound: false, providers: {} }
+  const config = entry.get('config', true)
+  const providersNode = YAML.isMap(config) ? config.get('providers', true) : null
+  if (!YAML.isMap(providersNode)) return { entryFound: true, providers: {} }
+  const providers = {}
+  for (const pair of providersNode.items) {
+    const id = String(nodeToJs(pair.key) ?? '')
+    const value = nodeToJs(pair.value)
+    if (id && value && typeof value === 'object' && !Array.isArray(value)) providers[id] = value
+  }
+  return { entryFound: true, providers }
+}
+
+export function mergeProviderIntoPatch(patchText, providerId, providerConfig) {
+  const id = validateProviderId(providerId)
+  const doc = parseYamlDocument(patchText, '配置文件')
+  const entry = findEntry(doc, PROVIDERS_ENTRY_ID)
+  if (!entry) {
+    const next = newEntryDocument(id, providerConfig)
+    quoteAmbiguousKeys(next.contents)
+    return stringifyPatch(next)
+  }
+  const providers = providerMapFor(doc, entry)
+  const node = doc.createNode(providerConfig)
+  quoteAmbiguousKeys(node)
+  providers.set(id, node)
+  return stringifyPatch(doc)
+}
+
+export function removeProviderFromPatch(patchText, providerId) {
+  const id = validateProviderId(providerId)
+  const doc = parseYamlDocument(patchText, '配置文件')
+  const entry = findEntry(doc, PROVIDERS_ENTRY_ID)
+  const config = entry ? entry.get('config', true) : null
+  const providers = YAML.isMap(config) ? config.get('providers', true) : null
+  let removed = 0
+  if (YAML.isMap(providers)) {
+    for (let i = providers.items.length - 1; i >= 0; i -= 1) {
+      if (String(nodeToJs(providers.items[i].key) ?? '') === id) {
+        providers.items.splice(i, 1)
+        removed += 1
+      }
+    }
+  }
+  if (!removed) throw httpError(404, 'error.provider.missing', `未找到供应商：${id}`)
+  return stringifyPatch(doc)
+}
+
+/* --- ~/.dsh/.credentials.yaml -------------------------------------------- */
+//
+// Keys never go into the patch: `apiKeyEnv` names an entry in the credentials
+// file's `refs` map, and only that map is touched — `records` is left alone.
+
+export function readCredentialNames(text) {
+  const doc = parseYamlDocument(text, '凭据文件')
+  const refs = YAML.isMap(doc.contents) ? doc.contents.get('refs', true) : null
+  return YAML.isMap(refs) ? refs.items.map((pair) => String(nodeToJs(pair.key) ?? '')).filter(Boolean) : []
+}
+
+export function mergeCredentialRef(text, name, value) {
+  if (!ENV_NAME_RE.test(String(name ?? ''))) {
+    throw httpError(400, 'error.provider.env', '密钥引用的名字需为全大写字母/数字/下划线')
+  }
+  const secret = String(value ?? '').trim()
+  if (!secret) throw httpError(400, 'error.provider.secret', 'API Key 不能为空')
+  const doc = parseYamlDocument(text, '凭据文件')
+  if (doc.contents == null) doc.contents = doc.createNode({})
+  if (!YAML.isMap(doc.contents)) throw httpError(500, 'error.credentials.shape', '凭据文件顶层不是映射')
+  let refs = doc.contents.get('refs', true)
+  if (refs !== undefined && !YAML.isMap(refs)) {
+    throw httpError(500, 'error.credentials.shape', '凭据文件的 refs 不是映射，已中止以免破坏现有记录')
+  }
+  if (!YAML.isMap(refs)) {
+    refs = doc.createNode({})
+    doc.contents.set('refs', refs)
+  }
+  refs.set(String(name), doc.createNode(secret))
+  return YAML.stringify(doc, { lineWidth: 0 })
+}
+
+/** Returns null when the ref (or the whole refs block) is absent — nothing to write. */
+export function removeCredentialRef(text, name) {
+  const doc = parseYamlDocument(text, '凭据文件')
+  if (!YAML.isMap(doc.contents)) return null
+  const refs = doc.contents.get('refs', true)
+  if (!YAML.isMap(refs)) return null
+  let removed = 0
+  for (let i = refs.items.length - 1; i >= 0; i -= 1) {
+    if (String(nodeToJs(refs.items[i].key) ?? '') === String(name)) {
+      refs.items.splice(i, 1)
+      removed += 1
+    }
+  }
+  return removed ? YAML.stringify(doc, { lineWidth: 0 }) : null
+}
+
+export async function readProviderState(env = process.env) {
+  const p = paths(env)
+  const [patchText, credentialsText] = await Promise.all([
+    readTextFile(p.patchFile, ''),
+    readTextFile(p.credentialsFile, ''),
+  ])
+  const { entryFound, providers } = readProvidersFromPatch(patchText)
+  let credentialNames = []
+  try {
+    credentialNames = readCredentialNames(credentialsText)
+  } catch {
+    credentialNames = []
+  }
+  const list = Object.entries(providers).map(([id, raw]) => ({
+    id,
+    api: String(raw.api ?? ''),
+    baseURL: String(raw.baseURL ?? ''),
+    apiKeyEnv: String(raw.apiKeyEnv ?? ''),
+    reasoning: String(raw.reasoning ?? ''),
+    models: Array.isArray(raw.models) ? raw.models : [],
+    modelCount: Array.isArray(raw.models) ? raw.models.length : 0,
+    hasCredential: credentialNames.includes(String(raw.apiKeyEnv ?? '')),
+  }))
+  return {
+    patchFile: p.patchFile,
+    credentialsFile: p.credentialsFile,
+    entryFound,
+    entryId: PROVIDERS_ENTRY_ID,
+    entryPackage: PROVIDERS_PACKAGE,
+    levels: THINKING_LEVELS,
+    providers: list,
+    credentialNames,
+  }
+}
+
+export async function saveProvider(env = process.env, { providerId, previousId, provider, apiKey } = {}) {
+  const id = validateProviderId(providerId)
+  const p = paths(env)
+  const patchText = await readTextFile(p.patchFile, '')
+  const config = renderProviderConfig(provider)
+  let nextPatch = mergeProviderIntoPatch(patchText, id, config)
+  const from = String(previousId ?? '').trim()
+  if (from && from !== id) nextPatch = removeProviderFromPatch(nextPatch, from)
+  validatePatchText(nextPatch)
+
+  let credentialsWritten = false
+  const secret = String(apiKey ?? '').trim()
+  if (secret) {
+    const credentialsText = await readTextFile(p.credentialsFile, 'version: 1\n')
+    const nextCredentials = mergeCredentialRef(credentialsText, config.apiKeyEnv, secret)
+    await writeWithBackup(p.credentialsFile, nextCredentials, 0o600, 3)
+    credentialsWritten = true
+  }
+  await writeWithBackup(p.patchFile, nextPatch, 0o600, 3)
+  return {
+    providerId: id,
+    previousId: from && from !== id ? from : null,
+    modelCount: config.models.length,
+    apiKeyEnv: config.apiKeyEnv,
+    credentialsWritten,
+    patchFile: p.patchFile,
+    credentialsFile: p.credentialsFile,
+  }
+}
+
+export async function deleteProvider(env = process.env, { providerId, dropCredential = false } = {}) {
+  const id = validateProviderId(providerId)
+  const p = paths(env)
+  const patchText = await readTextFile(p.patchFile, '')
+  const { providers } = readProvidersFromPatch(patchText)
+  const target = providers[id]
+  if (!target) throw httpError(404, 'error.provider.missing', `未找到供应商：${id}`)
+  const nextPatch = removeProviderFromPatch(patchText, id)
+  validatePatchText(nextPatch)
+
+  const envName = String(target.apiKeyEnv ?? '')
+  let credentialRemoved = false
+  let credentialInUse = false
+  if (dropCredential && ENV_NAME_RE.test(envName)) {
+    credentialInUse = Object.entries(providers).some(
+      ([other, cfg]) => other !== id && String(cfg?.apiKeyEnv ?? '') === envName,
+    )
+    if (!credentialInUse) {
+      const credentialsText = await readTextFile(p.credentialsFile, '')
+      const nextCredentials = credentialsText ? removeCredentialRef(credentialsText, envName) : null
+      if (nextCredentials) {
+        await writeWithBackup(p.credentialsFile, nextCredentials, 0o600, 3)
+        credentialRemoved = true
+      }
+    }
+  }
+  await writeWithBackup(p.patchFile, nextPatch, 0o600, 3)
+  return { providerId: id, credentialRemoved, credentialInUse, patchFile: p.patchFile }
 }

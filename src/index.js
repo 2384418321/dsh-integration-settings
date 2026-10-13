@@ -19,6 +19,10 @@ import {
   readPersona,
   readPersonaBackup,
   savePersona,
+  readProviderState,
+  saveProvider,
+  deleteProvider,
+  probeGateway,
   httpError,
 } from './core.js'
 
@@ -152,6 +156,7 @@ async function stateResponse(ctx, req, url) {
     },
     skills: { roots, rootId: rootId || null, list: skills },
     persona: await readPersona(env, cwd),
+    providers: await readProviderState(env),
   }
 }
 
@@ -227,6 +232,12 @@ async function skillListResponse(ctx, req, url) {
   return { rootId, rootPath, list: await listSkills(rootPath) }
 }
 
+// The probe is the only call that ever holds an API key typed into the form; it
+// runs host-side so the key never has to round-trip through a saved file first.
+async function probeProviderGateway(body) {
+  return probeGateway({ baseURL: body && body.baseURL, apiKey: body && body.apiKey })
+}
+
 async function handle(ctx, req, res) {
   const url = new URL(req.url || '/', 'http://localhost')
   const route = url.pathname.replace(/\/+$/, '').slice(API_PREFIX.length) || '/'
@@ -279,6 +290,14 @@ async function handle(ctx, req, res) {
       const cwd = body.cwd || sessionCwd(ctx, req, url)
       return json(res, 200, { ok: true, data: await savePersona(process.env, { ...body, cwd }) })
     }
+    case 'GET /provider/list':
+      return json(res, 200, { ok: true, data: await readProviderState(process.env) })
+    case 'POST /provider/probe':
+      return json(res, 200, { ok: true, data: await probeProviderGateway(body) })
+    case 'POST /provider/save':
+      return json(res, 200, { ok: true, data: await saveProvider(process.env, body || {}) })
+    case 'POST /provider/delete':
+      return json(res, 200, { ok: true, data: await deleteProvider(process.env, body || {}) })
     default:
       return json(res, 404, { ok: false, code: 'error.proto.notFound', error: `未知接口：${req.method} ${route}` })
   }

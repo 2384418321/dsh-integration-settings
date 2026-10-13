@@ -105,17 +105,18 @@ test('every section renders markup against the shell React seed', async () => {
   })
   const { ctx, registered } = fakeCtx()
   mod.apply(ctx)
-  assert.equal(registered.length, 3)
+  assert.equal(registered.length, 4)
 
   for (const entry of registered) {
     const html = renderSection(entry.component)
     assert.ok(html.length > 40, `${entry.spec.id} renders non-trivial markup (got ${html.length} chars)`)
     assert.match(html, /dsi-root/, `${entry.spec.id} renders the plugin root element`)
   }
-  const [mcp, skills, persona] = registered.map((entry) => renderSection(entry.component))
+  const [mcp, skills, persona, providers] = registered.map((entry) => renderSection(entry.component))
   assert.match(mcp, /dsi-tabs|dsi-panel|MCP/)
   assert.match(skills, /Skill|技能/)
   assert.match(persona, /人设|persona/i)
+  assert.match(providers, /供应商|providers/i)
 })
 
 test('sections render against a plain React namespace too', async () => {
