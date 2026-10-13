@@ -3,8 +3,7 @@ import test from 'node:test'
 import YAML from 'yaml'
 import {
   buildEffortMap,
-  deleteProvider,
-  mergeCredentialRef,
+  judgeProvider,
   mergeProviderIntoPatch,
   normalizeBaseURL,
   normalizeGatewayModel,
@@ -14,13 +13,8 @@ import {
   readCredentialValue,
   readProviderState,
   readProvidersFromPatch,
-  removeCredentialRef,
-  removeProviderFromPatch,
-  renderProviderConfig,
-  saveProvider,
   unlockPlan,
   unlockProviderThinking,
-  validateModel,
 } from '../src/core.js'
 
 /* -------------------------------------------------------------- fixtures */
@@ -235,55 +229,26 @@ test('mergeProviderIntoPatch refuses to clobber a non-map providers block', () =
   assert.throws(() => mergeProviderIntoPatch(broken, 'lan', { apiKeyEnv: 'K', baseURL: 'http://h/v1', models: [{ id: 'a' }] }), /providers 不是映射/)
 })
 
-test('removeProviderFromPatch drops exactly one provider', () => {
-  const withLan = mergeProviderIntoPatch(PATCH_FIXTURE, 'lan', {
-    apiKeyEnv: 'LAN_KEY',
-    baseURL: 'http://h/v1',
-    models: [{ id: 'a' }],
-  })
-  const back = removeProviderFromPatch(withLan, 'lan')
-  assert.deepEqual(Object.keys(readProvidersFromPatch(back).providers), ['workbudy'])
-  assert.throws(() => removeProviderFromPatch(back, 'lan'), /未找到供应商：lan/)
-})
-
-/* ------------------------------------------------------------ validation */
-
-test('validateModel normalizes effort maps and rejects an empty id', () => {
-  const model = validateModel({ id: ' m ', name: '', input: ['image', 'bogus'], reasoningEfforts: { off: null, high: 'high' } })
-  assert.deepEqual(model, { id: 'm', name: 'm', input: ['image'], reasoningEfforts: { off: null, high: 'high' } })
-  assert.throws(() => validateModel({ id: '  ' }), /模型 id 不能为空/)
-})
-
-test('validateModel keeps every declared effort level, including `false`', () => {
-  // `false` is the documented spelling for "this model does not reason": it is a
-  // declaration, so a save must not turn it into an absent field.
-  assert.equal(validateModel({ id: 'm', reasoningEfforts: false }).reasoningEfforts, false)
-  // A declared value is the wire spelling the gateway receives, so rewriting it
-  // (e.g. forcing `off` to null) would silently change dispatch behaviour.
-  assert.deepEqual(
-    validateModel({ id: 'm', reasoningEfforts: { off: 'skip', max: 'ultra' } }).reasoningEfforts,
-    { off: 'skip', max: 'ultra' },
-  )
-  // An unknown level id is preserved rather than silently discarded.
-  assert.deepEqual(validateModel({ id: 'm', reasoningEfforts: { turbo: 'turbo' } }).reasoningEfforts, { turbo: 'turbo' })
-  assert.equal(validateModel({ id: 'm', reasoningEfforts: {} }).reasoningEfforts, undefined)
-})
-
 test('a provider mixing `false` and dict effort maps survives a patch round trip', () => {
-  const config = renderProviderConfig({
+  // The unlock pass hands the merger models straight from the gateway, so the
+  // splice itself has to carry both `reasoningEfforts: false` and a quoted
+  // `"off":` key through YAML without rewriting them.
+  const config = {
     apiKeyEnv: 'WORKBUDY_LAN_API_KEY',
+    api: 'openai-completions',
     baseURL: 'http://192.168.2.202:7863/v1',
     models: [
       { id: 'cn:glm-4.6', name: 'GLM-4.6', contextWindow: 168000, maxTokens: 32000, input: ['text', 'image'], reasoningEfforts: false },
-      { id: 'cn:auto', name: 'Auto', input: ['text'], reasoningEfforts: { high: 'high' } },
+      { id: 'cn:auto', name: 'Auto', input: ['text'], reasoningEfforts: { off: null, high: 'high' } },
       { id: 'cn:plain', name: 'Plain', input: ['text'] },
     ],
-  })
+  }
   const next = mergeProviderIntoPatch(PATCH_FIXTURE, 'workbudy-lan', config)
   assert.match(next, /reasoningEfforts: false/)
+  assert.match(next, /"off":\n/)
   const back = readProvidersFromPatch(next).providers['workbudy-lan']
   assert.equal(back.models[0].reasoningEfforts, false)
-  assert.deepEqual(back.models[1].reasoningEfforts, { high: 'high' })
+  assert.deepEqual(back.models[1].reasoningEfforts, { off: null, high: 'high' })
   assert.equal(back.models[2].reasoningEfforts, undefined)
   // the untouched provider in the same file keeps its shape
   assert.deepEqual(readProvidersFromPatch(next).providers.workbudy.models[0].id, 'cn:auto')
@@ -333,47 +298,10 @@ test('editing one provider leaves the other groups byte-identical', () => {
   assert.ok(out.includes('          - id: c'))
 })
 
-test('saving a provider unchanged rewrites nothing', () => {
+test('merging a provider back unchanged rewrites nothing', () => {
   const { providers } = readProvidersFromPatch(PATCH_FIXTURE)
-  const out = mergeProviderIntoPatch(PATCH_FIXTURE, 'workbudy', renderProviderConfig(providers.workbudy))
+  const out = mergeProviderIntoPatch(PATCH_FIXTURE, 'workbudy', providers.workbudy)
   assert.equal(out, PATCH_FIXTURE)
-})
-
-test('renderProviderConfig enforces the env name and model count', () => {
-  const provider = renderProviderConfig({ apiKeyEnv: 'LAN_KEY', baseURL: 'http://h/v1', models: [{ id: 'a' }] })
-  assert.equal(provider.api, 'openai-completions')
-  assert.throws(() => renderProviderConfig({ apiKeyEnv: 'lower', baseURL: 'http://h/v1', models: [{ id: 'a' }] }), /全大写/)
-  assert.throws(() => renderProviderConfig({ apiKeyEnv: 'LAN_KEY', baseURL: 'http://h/v1', models: [] }), /至少需要保留一个模型/)
-  assert.throws(() => renderProviderConfig({ apiKeyEnv: 'LAN_KEY', baseURL: 'http://h/v1', reasoning: 'turbo', models: [{ id: 'a' }] }), /未知的默认思考档位/)
-})
-
-/* ----------------------------------------------------------- credentials */
-
-test('mergeCredentialRef only touches refs and keeps records intact', () => {
-  const next = mergeCredentialRef(CREDENTIALS_FIXTURE, 'WORKBUDY_LAN_API_KEY', 'sk-a30IaMiBgZhyAeVMeAIPBM1m1')
-  const parsed = YAML.parse(next)
-  assert.equal(parsed.version, 1)
-  assert.deepEqual(parsed.records['deepseek-account-platform/default'], {
-    access: 'secret-access',
-    refresh: 'secret-refresh',
-  })
-  assert.equal(parsed.refs.WORKBUDY_API_KEY, 'sk-existing')
-  assert.equal(parsed.refs.WORKBUDY_LAN_API_KEY, 'sk-a30IaMiBgZhyAeVMeAIPBM1m1')
-  assert.deepEqual(readCredentialNames(next), ['WORKBUDY_API_KEY', 'WORKBUDY_LAN_API_KEY'])
-})
-
-test('mergeCredentialRef can create the refs block from scratch', () => {
-  const next = mergeCredentialRef('version: 1\n', 'LAN_KEY', 'sk-x')
-  assert.deepEqual(YAML.parse(next), { version: 1, refs: { LAN_KEY: 'sk-x' } })
-  assert.throws(() => mergeCredentialRef(CREDENTIALS_FIXTURE, 'LAN_KEY', '  '), /API Key 不能为空/)
-  assert.throws(() => mergeCredentialRef('refs: nope\n', 'LAN_KEY', 'sk-x'), /refs 不是映射/)
-})
-
-test('removeCredentialRef is a no-op when the ref is absent', () => {
-  const removed = removeCredentialRef(CREDENTIALS_FIXTURE, 'WORKBUDY_API_KEY')
-  assert.deepEqual(YAML.parse(removed).refs, {})
-  assert.equal(removeCredentialRef(CREDENTIALS_FIXTURE, 'NOT_THERE'), null)
-  assert.equal(removeCredentialRef('version: 1\n', 'NOT_THERE'), null)
 })
 
 /* --------------------------------------------------- end-to-end file flow */
@@ -405,92 +333,6 @@ test('sandbox resolves inside the temp dir, never the live profile', async (t) =
   assert.equal(resolved.profileDir, profileDir)
   assert.equal(resolved.credentialsFile, `${home}/.credentials.yaml`)
   assert.ok(resolved.patchFile.startsWith(profileDir))
-})
-
-test('saveProvider writes patch + credentials and backs both up', async (t) => {
-  const { fsp, home, profileDir, env } = await sandbox(t)
-  const result = await saveProvider(env, {
-    providerId: 'workbudy-lan',
-    provider: {
-      apiKeyEnv: 'WORKBUDY_LAN_API_KEY',
-      baseURL: 'http://192.168.2.202:7863/v1',
-      reasoning: 'high',
-      models: [normalizeGatewayModel(GATEWAY_ROW)],
-    },
-    apiKey: 'sk-a30IaMiBgZhyAeVMeAIPBM1m1',
-  })
-  assert.equal(result.modelCount, 1)
-  assert.equal(result.credentialsWritten, true)
-
-  const state = await readProviderState(env)
-  const lan = state.providers.find((p) => p.id === 'workbudy-lan')
-  assert.equal(lan.hasCredential, true)
-  assert.equal(lan.apiKeyEnv, 'WORKBUDY_LAN_API_KEY')
-  assert.equal(state.entryFound, true)
-
-  // `off` is emitted without a value, and the key stays quoted
-  const patch = await fsp.readFile(`${profileDir}/cordis.patch.yml`, 'utf8')
-  assert.match(patch, /"off":\n/)
-  assert.doesNotMatch(patch, /"off": null/)
-  assert.match(patch, /command: !!js process\.env\.MCP_BIN/)
-
-  const files = await fsp.readdir(profileDir)
-  assert.ok(files.some((n) => n.startsWith('cordis.patch.yml.bak-')), 'patch backup written')
-  const homeFiles = await fsp.readdir(home)
-  assert.ok(homeFiles.some((n) => n.startsWith('.credentials.yaml.bak-')), 'credentials backup written')
-})
-
-test('saveProvider without a key keeps the existing ref untouched', async (t) => {
-  const { env } = await sandbox(t)
-  await saveProvider(env, {
-    providerId: 'lan',
-    provider: { apiKeyEnv: 'WORKBUDY_API_KEY', baseURL: 'http://h/v1', models: [{ id: 'a' }] },
-  })
-  const state = await readProviderState(env)
-  assert.deepEqual(state.credentialNames, ['WORKBUDY_API_KEY'])
-  assert.equal(state.providers.find((p) => p.id === 'lan').hasCredential, true)
-})
-
-test('deleteProvider can drop the credential it owned', async (t) => {
-  const { env } = await sandbox(t)
-  await saveProvider(env, {
-    providerId: 'lan',
-    provider: { apiKeyEnv: 'LAN_KEY', baseURL: 'http://h/v1', models: [{ id: 'a' }] },
-    apiKey: 'sk-lan',
-  })
-  const gone = await deleteProvider(env, { providerId: 'lan', dropCredential: true })
-  assert.equal(gone.credentialRemoved, true)
-  const state = await readProviderState(env)
-  assert.deepEqual(state.providers.map((p) => p.id), ['workbudy'])
-  assert.deepEqual(state.credentialNames, ['WORKBUDY_API_KEY'])
-})
-
-test('deleteProvider keeps a ref that another provider still uses', async (t) => {
-  const { env } = await sandbox(t)
-  await saveProvider(env, {
-    providerId: 'twin',
-    provider: { apiKeyEnv: 'WORKBUDY_API_KEY', baseURL: 'http://h/v1', models: [{ id: 'a' }] },
-  })
-  const gone = await deleteProvider(env, { providerId: 'twin', dropCredential: true })
-  assert.equal(gone.credentialInUse, true)
-  assert.equal(gone.credentialRemoved, false)
-  assert.deepEqual((await readProviderState(env)).credentialNames, ['WORKBUDY_API_KEY'])
-})
-
-test('saveProvider renames a provider without leaving a duplicate key', async (t) => {
-  const { env } = await sandbox(t)
-  await saveProvider(env, {
-    providerId: 'old-name',
-    provider: { apiKeyEnv: 'LAN_KEY', baseURL: 'http://h/v1', models: [{ id: 'a' }] },
-  })
-  await saveProvider(env, {
-    providerId: 'new-name',
-    previousId: 'old-name',
-    provider: { apiKeyEnv: 'LAN_KEY', baseURL: 'http://h/v2', models: [{ id: 'a' }] },
-  })
-  const state = await readProviderState(env)
-  assert.deepEqual(state.providers.map((p) => p.id).sort(), ['new-name', 'workbudy'])
-  assert.equal(state.providers.find((p) => p.id === 'new-name').baseURL, 'http://h/v2')
 })
 
 /* ------------------------------------------------------- thinking unlock */
@@ -694,4 +536,52 @@ test('unlockProviderThinking refuses a patch without the llm-pi-ai entry', async
   const { fsp, resolved, env } = await unlockSandbox(t)
   await fsp.writeFile(resolved.patchFile, '# nothing here\n- id: ui-chat\n', { mode: 0o600 })
   await assert.rejects(() => unlockProviderThinking(env, { fetchImpl: stubFetch({}) }), /没有 - id: llm-pi-ai 条目/)
+})
+
+/* --------------------------------------------------- gateway detection */
+
+test('judgeProvider only claims providers that really are gateways', () => {
+  const creds = { credentialNames: ['LAN_KEY'], env: {} }
+  const ok = judgeProvider({ apiKeyEnv: 'LAN_KEY', baseURL: 'http://g.example:7863/v1' }, creds)
+  assert.equal(ok.verdict, 'gateway')
+  assert.match(ok.reason, /OpenAI 兼容网关/)
+  assert.equal(judgeProvider({ apiKeyEnv: 'LAN_KEY', api: 'anthropic-messages', baseURL: 'http://g/v1' }, creds).verdict, 'skipped')
+  assert.match(judgeProvider({ apiKeyEnv: 'LAN_KEY', api: 'anthropic-messages', baseURL: 'http://g/v1' }, creds).reason, /anthropic-messages/)
+  assert.equal(judgeProvider({ apiKeyEnv: 'LAN_KEY' }, creds).verdict, 'skipped')
+  assert.equal(judgeProvider({ apiKeyEnv: 'LAN_KEY', baseURL: 'not a url' }, creds).verdict, 'skipped')
+  assert.equal(judgeProvider({ apiKeyEnv: 'LAN_KEY', baseURL: 'ftp://g/v1' }, creds).verdict, 'skipped')
+  const noKey = judgeProvider({ apiKeyEnv: 'MISSING_KEY', baseURL: 'http://g/v1' }, creds)
+  assert.equal(noKey.verdict, 'skipped')
+  assert.match(noKey.reason, /MISSING_KEY/)
+  // no apiKeyEnv at all is fine, and the process environment counts as a source
+  assert.equal(judgeProvider({ baseURL: 'http://g/v1' }, creds).verdict, 'gateway')
+  assert.equal(judgeProvider({ apiKeyEnv: 'ENV_KEY', baseURL: 'http://g/v1' }, { credentialNames: [], env: { ENV_KEY: 'x' } }).verdict, 'gateway')
+})
+
+test('unlockProviderThinking skips a non-gateway provider without probing it', async (t) => {
+  const { fsp, resolved, env } = await unlockSandbox(t)
+  const patched = UNLOCK_PATCH.replace('      quiet:\n', '      quiet:\n        api: anthropic-messages\n')
+  assert.notEqual(patched, UNLOCK_PATCH)
+  await fsp.writeFile(resolved.patchFile, patched, { mode: 0o600 })
+  const fetchImpl = stubFetch({ 'https://locked.example/v1/models': [{ id: 'm-reason' }] })
+  const report = await unlockProviderThinking(env, { dryRun: true, fetchImpl })
+  const quiet = report.providers.find((r) => r.id === 'quiet')
+  assert.equal(quiet.verdict, 'skipped')
+  assert.equal(quiet.status, 'skipped')
+  assert.match(quiet.reason, /anthropic-messages/)
+  assert.deepEqual(report.gatewayProviders, ['locked'])
+  assert.deepEqual(report.skippedProviders, ['quiet'])
+  assert.equal(fetchImpl.seen.length, 1)
+})
+
+test('unlockProviderThinking reports a gateway whose credential is missing instead of failing', async (t) => {
+  const { fsp, resolved, env } = await unlockSandbox(t)
+  await fsp.writeFile(resolved.credentialsFile, 'version: 1\nrefs:\n  QUIET_KEY: sk-quiet\n', { mode: 0o600 })
+  const fetchImpl = stubFetch({ 'https://quiet.example/v1/models': [{ id: 'm-quiet' }] })
+  const report = await unlockProviderThinking(env, { dryRun: true, fetchImpl })
+  const locked = report.providers.find((r) => r.id === 'locked')
+  assert.equal(locked.verdict, 'skipped')
+  assert.match(locked.reason, /LOCKED_KEY/)
+  assert.deepEqual(report.gatewayProviders, ['quiet'])
+  assert.equal(fetchImpl.seen.length, 1)
 })

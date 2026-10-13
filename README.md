@@ -13,7 +13,7 @@
 | **MCP 管理** | 增 / 删 / 改 / 启停 MCP 服务器 | 当前 profile 的 `cordis.patch.yml`（受管区块）+ `.dsh-integration/mcp.json`（真理源） |
 | **Skill 管理** | 浏览 / 新建 / 编辑 / 删除技能 | DSH 全局、共享 `.agents`、Claude / Codex 全局目录，以及当前项目的 `.dsh` / `.agents` / `.claude` 目录 |
 | **全局人设** | 可视化编辑人设文件（等价于 Claude Code 的 `CLAUDE.md`） | `$DSH_HOME/AGENTS.md`（全局）与 `<项目>/AGENTS.md`（当前项目） |
-| **思考解锁** | 打开即自动识别每个网关支持的思考档位，一键解锁；兼新增 / 编辑 / 删除 OpenAI 兼容网关与拉取模型列表 | 当前 profile 的 `cordis.patch.yml`（`llm-pi-ai` 条目的 `config.providers`）+ `$DSH_HOME/.credentials.yaml`（`refs`，只存密钥） |
+| **思考解锁** | 打开即自动识别每个网关真正支持的思考档位，一键解锁写回配置 | 当前 profile 的 `cordis.patch.yml`（`llm-pi-ai` 条目的 `config.providers`）+ `$DSH_HOME/.credentials.yaml`（`refs`，只存密钥） |
 
 > 这是社区插件，不是 DeepSeek 官方产品。安装前请自行评估，建议先备份 profile 目录。
 
@@ -77,7 +77,7 @@ DSH="/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh"
 
 ### 安装完成后怎么确认
 
-1. DSH 重启后，**设置**（Settings）左栏底部出现四项：`MCP 管理 / Skill 管理 / 全局人设 / 模型供应商`。
+1. DSH 重启后，**设置**（Settings）左栏底部出现四项：`MCP 管理 / Skill 管理 / 全局人设 / 思考解锁`。
 2. 打开「MCP 管理」，页面上方的 **profile 徽标**应显示你要操作的那个 profile 名；
    多 profile 场景下先核对徽标，再动手改。
 3. 已有 MCP 服务器应被列出；`cordis.patch.yml` 里手写但未被纳管的行会以横幅提示，可一键导入。
@@ -175,43 +175,50 @@ DSH 的 `@deepseek-ai/dsh-agent-instructions` 插件会在每个会话的首个�
 以及 `AGENTS.local.md`/`CLAUDE.local.md`）。本页就是这份全局文件的编辑器，并列出最近 3 份备份
 供一键载回。
 
-### 思考解锁（兼模型供应商管理）
+### 思考解锁
+
 DSH 的模型供应商由 `@deepseek-ai/dsh-llm-pi-ai` 的 `config.providers` 决定，写在各 profile 的
 `cordis.patch.yml` 里。思考档位（`reasoningEfforts`）一旦声明就是**白名单**：没声明的档位在模型
-选择器里就是灰的，所以「这个模型能不能选 High / Max」完全由那几十行 YAML 决定。本页的主职是把这件
-事自动化。
+选择器里就是灰的，所以「这个模型能不能选 High / Max」完全由那几十行 YAML 决定。本页只做这一件事：
+**自动识别 + 一键解锁**。
 
-**自动识别 + 一键解锁**
+**自动识别（只读，不改文件）**
 
-- **打开页面即自动识别**：对每个已配置的网关发一次只读的 `GET /models`，读出
-  `reasoning_supported_efforts` / `can_disable_thinking`，逐模型与当前配置比对。识别阶段
-  **不写任何文件**，页面显示「待解锁 N / 已解锁 M / 网关未声明 K」。
-- **一键解锁**：点「全部解锁」把档位写回 `cordis.patch.yml`，写前自动备份。**网关的能力表是唯一
-  真相**——网关说某模型只支持 `medium`，就只声明 `medium`；你配置里多出来的档位会被去掉。页面在
-  解锁前会把「会减少档位」的模型连 `原档位 → 新档位` 一起列出来。
-- **只解锁这个条目下的网关**：只有 `- id: llm-pi-ai` 的 `config.providers` 里的供应商会被读取和
-  改写。DSH 自带的 `deepseek-official` / `deepseek-account` 不在这个文件里，插件碰不到。
-- **网关没说的模型不动**：网关对某个模型完全没给思考信息时，插件保留你原来的声明，
-  **绝不会替你写成 `reasoningEfforts: false`**（那等于宣称该模型不支持思考）。
-- **一个网关探测失败不影响其它**：失败的那个会单独报错，其余照常解锁。
+- **打开页面即自动探测**：对每个被判定为网关的供应商发一次只读的 `GET /models`，读出
+  `reasoning_supported_efforts` / `can_disable_thinking`，逐模型与当前配置比对，页面显示
+  「待解锁 N / 已一致 M / 网关未声明 K / 网关已不提供 G」。识别阶段**不写任何文件**。
+- **按形态自动判断，不写死名字**：只处理同时满足「`api` 为空或 `openai-completions`」+
+  「`baseURL` 是 http(s) 地址」+「`apiKeyEnv` 的凭据在 `$DSH_HOME/.credentials.yaml` 的 `refs:` 里
+  或存在同名环境变量」的供应商。其余在页面上标出**跳过原因**（`api` 不是 OpenAI 兼容 / 地址不可解析 /
+  凭据缺失），既不探测也不改写。
+- **只碰这个条目的 `config.providers`**：`- id: llm-pi-ai` 以外的条目一律不读不写。DSH 自带的
+  `deepseek-official` / `deepseek-account` 不在这个文件里，插件碰不到。
+- **点「查看模型」**可展开某个供应商的**只读**模型清单，逐个看它当前声明了哪些档位、以及网关要求
+  改成什么（含会去掉哪几档）。
 
-**表单部分（新增 / 编辑 / 删除网关）**
+**一键解锁**
 
-- **只改进已有的 `- id: llm-pi-ai` 条目**，不新建第二个同名条目——cordis 的同 id 条目会让 DSH
-  启动直接失败（去重得用 `dev_fix_patch`）。找不到该条目时页面会黄条提示。
-- **走 YAML 文档树改写**（解析成 document 改节点再序列化），不是 `parse → JS → stringify`，
-  这样文件里的注释和其它条目的内容都原样保留。
-- **密钥不写进 patch**：`apiKeyEnv` 只是引用名，密钥本体写到 `$DSH_HOME/.credentials.yaml` 的
-  `refs:` 段。页面上的 apiKey 输入框只在「新增」或「想换密钥」时填，留空就不动既有密钥。
-- **兼容手写分组**：页面对 `providers:` 下每个供应商只改自己那一段字节，不改动的分组会**逐字节
-  原样保留**——手写的流式列表（`input: [ "text", "image" ]`）、带引号的标量、以及
-  `reasoningEfforts: false`（声明「不支持思考」的模型）都不会被重排或丢掉。把某个供应商原样保存
-  回去时文件零变化。
+- 点「全部解锁」把档位写进 `cordis.patch.yml`，写前自动备份。**网关的能力表是唯一真相**——网关说
+  某模型只支持 `medium` 就只声明 `medium`，你配置里多出来的档位会被去掉；解锁前页面会把「会减少
+  档位」的模型连 `原档位 → 新档位` 一起列出来。
+- **网关没说的模型不动**：网关对某个模型完全没给思考信息时，插件保留你原来的声明，**绝不会**替你
+  写成 `reasoningEfforts: false`（那等于宣称该模型不支持思考）。网关已不提供的模型同样原样保留。
+- **一个网关探测失败不影响其它**：失败的那个单独报错，其余照常解锁。
+- **兼容手写分组**：写回时只替换目标供应商自己那一段字节，其它分组**逐字节原样保留**——手写的流式
+  列表（`input: [ "text", "image" ]`）、带引号的标量、`reasoningEfforts: false`（声明「不支持思考」
+  的模型）都不会被重排或丢掉；没有任何改动时文件零变化。
 - **`"off"` 必须带引号**：YAML 1.1 会把裸 `off:` 解析成布尔 `false`，档位字典的键类型就错了。
   插件写出的 `off` 一定带引号。
-- 保存 / 解锁 / 删除都会写 `.bak-<时间戳>` 备份（各保留最近 3 份），两个文件权限都按 `0600` 写。
+- 解锁写盘时留 `.bak-<时间戳>` 备份（保留最近 3 份），文件权限按 `0600` 写。
 
-改完需**重启 DSH** 才会在模型选择器里出现；重启前可用 `de_models` 核对每个模型是否带上了
+**本页不做什么**
+
+- **不新增、不编辑、不删除供应商，也不写密钥**：宿主端只提供 `GET /provider/list`（只读状态）与
+  `POST /provider/unlock`（解锁写入）两条路由，页面上的按钮也只有「全部解锁」和「重新识别」。
+  要加网关请改 `cordis.patch.yml`。
+- 没有待解锁项时不会有任何写入动作。
+
+解锁后需**重启 DSH** 才会在模型选择器里看到新档位；重启前可用 `de_models` 核对每个模型是否带上了
 「思考等级」。
 
 ## 安全边界
@@ -231,17 +238,19 @@ DSH 的模型供应商由 `@deepseek-ai/dsh-llm-pi-ai` 的 `config.providers` �
 pnpm install                    # 首次
 node scripts/build.mjs          # esbuild：src/index.js -> lib/index.js，src/client.jsx -> lib/client.js
 DSI_DEBUG=1 node scripts/build.mjs   # 调试用：客户端包不压缩、保留函数名、内联 sourcemap
-node --test test/*.test.js      # 30 个测试（必须给 glob；node --test test/ 会把目录当模块）
+node --test test/*.test.js      # 53 个测试（必须给 glob；node --test test/ 会把目录当模块）
 ```
 
 - `test/core.test.js`：patch 区块生成/替换/幂等、`!!js` 标签往返、`[]` 空占位、服务器校验、
   技能 CRUD（含 `../` 逃逸拒绝）、人设备份轮转与读取。
-- `test/host.test.js`：**对着构建产物**起真 HTTP 服务，覆盖 10 条路由 + 三道安全栅栏。
+- `test/host.test.js`：**对着构建产物**起真 HTTP 服务，覆盖 11 条路由 + 404 分支 + 三道安全栅栏。
 - `test/client.test.js`：按 `window.__ModuleLoader__.load` 的真实加载方式加载客户端包，
   断言三个 `settings.section` 注册（含无 locale 服务、locale 抛异常两种降级路径）。
 - `test/client-render.test.js`：用真 React + `react-dom/server` 按 shell 的 `as()` 语义复刻
   React 种子，断言三个页面都能渲染出非空 DOM。
 - `test/client-hooks.test.js`：hook 顺序与 seat hook 的白盒回归（见上一节）。
+- `test/providers.test.js`：网关判定（`judgeProvider`）与 `/models` 探测、`unlockPlan` 纯函数、
+  解锁写入与备份、`dryRun` 不落盘、跳过非网关与凭据缺失、`"off"` 引号与 `false` 声明往返。
 
 调试小工具：浏览器控制台里 `localStorage.dsiDebug = '1'` 后重载，会**打印一次** seat 分享的
 props 键名（默认静默，不影响用户控制台）。

@@ -3,6 +3,29 @@
 本文件的格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.3] - 2026-10-13
+
+### 变更
+- **设置页只做「思考解锁」**：移除供应商的**新增 / 编辑 / 删除**能力——页面按钮与表单、
+  `ProviderEditor`、宿主端 `POST /provider/probe`、`/provider/save`、`/provider/delete` 三条路由，
+  以及 `core.js` 里只服务于它们的 `saveProvider` / `deleteProvider` / `renderProviderConfig` /
+  `validateModel` / `mergeCredentialRef` / `removeCredentialRef` / `removeProviderFromPatch` 一并删除。
+  宿主端只剩 `GET /provider/list`（只读状态）与 `POST /provider/unlock`（解锁写入）两条路由。
+- **自动识别改为按网关形态判断**（新增 `judgeProvider`）：不再假定 `providers:` 下的每一项都是网关，
+  只有同时满足「`api` 为空或 `openai-completions`」+「`baseURL` 是 http(s) 地址」+
+  「`apiKeyEnv` 的凭据在 `.credentials.yaml` 的 `refs:` 里或存在同名环境变量」才被探测；其余在页面上
+  标出**跳过原因**（`api` 不是 OpenAI 兼容 / 地址不可解析 / 凭据缺失），既不探测也不改写，并计入返回值
+  的 `gatewayProviders` / `skippedProviders`。探测失败单独标记为 `unreachable`，不与其他网关互相影响。
+- 页面新增「查看模型」：展开某供应商的**只读**模型清单，逐个显示当前声明的档位与网关要求的目标档位
+  （含会去掉哪几档），替代原先的编辑表单。
+- 解锁用 `apiKeyEnv` 取密钥时支持环境变量回退（凭据文件里没有该引用时读同名环境变量）。
+
+### 测试
+- 删除 12 项只覆盖已移除 API 的用例；新增 3 项：`judgeProvider` 的四类判定与原因（含 `ftp:`、
+  无法解析的地址、缺失凭据、无 `apiKeyEnv`、环境变量回退）、非网关供应商**不被探测**、凭据缺失的
+  网关被标为跳过而不是失败。两项 patch 往返用例改为走解锁路径（配置直接取自 patch 自身，不再经
+  `renderProviderConfig`）。全套 53 项通过。
+
 ## [0.2.2] - 2026-10-13
 
 ### 新增

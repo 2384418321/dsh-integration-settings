@@ -152,4 +152,21 @@ test('host API: state, MCP lifecycle, fences, skills and persona', async (t) => 
 
   res = await call(host, '/persona/save', { method: 'POST', body: { scope: 'global', cwd: host.root, content: '# 再次保存\n' } })
   assert.equal(res.status, 200, 'global scope wins even when a cwd is present')
+
+  // ---- thinking unlock ----------------------------------------------------
+  // The page detects gateways and unlocks thinking levels. Provider add / edit /
+  // delete is deliberately not exposed, so those routes must stay gone.
+  res = await call(host, '/provider/list')
+  assert.equal(res.status, 200)
+  assert.equal(res.json.data.entryFound, false, 'this profile has no llm-pi-ai entry yet')
+
+  res = await call(host, '/provider/unlock', { method: 'POST', body: { dryRun: true } })
+  assert.equal(res.status, 404)
+  assert.match(res.json.error, /llm-pi-ai/)
+
+  for (const route of ['/provider/probe', '/provider/save', '/provider/delete']) {
+    res = await call(host, route, { method: 'POST', body: { providerId: 'workbudy' } })
+    assert.equal(res.status, 404, `${route} is not an endpoint any more`)
+    assert.equal(res.json.code, 'error.proto.notFound')
+  }
 })

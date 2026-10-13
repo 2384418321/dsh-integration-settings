@@ -116,7 +116,10 @@ test('every section renders markup against the shell React seed', async () => {
   assert.match(mcp, /dsi-tabs|dsi-panel|MCP/)
   assert.match(skills, /Skill|技能/)
   assert.match(persona, /人设|persona/i)
-  assert.match(providers, /供应商|providers/i)
+  assert.match(providers, /思考解锁/)
+  assert.match(providers, /全部解锁/)
+  // the provider management form is gone for good
+  assert.doesNotMatch(providers, /新增供应商|测试连接|拉取模型/)
 })
 
 test('sections render against a plain React namespace too', async () => {

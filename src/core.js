@@ -620,7 +620,6 @@ export async function savePersona(env = process.env, { scope = 'global', cwd = n
 export const PROVIDERS_ENTRY_ID = 'llm-pi-ai'
 export const PROVIDERS_PACKAGE = '@deepseek-ai/dsh-llm-pi-ai'
 export const PROVIDER_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/
-export const ENV_NAME_RE = /^[A-Z][A-Z0-9_]{1,63}$/
 export const PROBE_TIMEOUT_MS = 15000
 /** Level ids understood by @deepseek-ai/dsh-llm-pi-ai, ascending. */
 export const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
@@ -817,62 +816,6 @@ function stringifyPatch(doc) {
   return YAML.stringify(doc, { lineWidth: 0 }).replace(/"off": null/g, '"off":')
 }
 
-export function validateModel(input) {
-  const id = String(input?.id ?? '').trim()
-  if (!id) throw httpError(400, 'error.provider.model', '模型 id 不能为空')
-  const model = { id, name: String(input?.name ?? '').trim() || id }
-  const contextWindow = Number(input?.contextWindow)
-  if (Number.isFinite(contextWindow) && contextWindow > 0) model.contextWindow = Math.trunc(contextWindow)
-  const maxTokens = Number(input?.maxTokens)
-  if (Number.isFinite(maxTokens) && maxTokens > 0) model.maxTokens = Math.trunc(maxTokens)
-  const kinds = (Array.isArray(input?.input) ? input.input : ['text']).map((v) => String(v))
-  model.input = kinds.filter((v) => v === 'text' || v === 'image')
-  if (!model.input.length) model.input = ['text']
-  // `reasoningEfforts: false` is the documented spelling for "this model does
-  // not reason" — a declaration, not an absent value, so it must survive a
-  // round trip instead of being dropped.
-  const raw = input?.reasoningEfforts
-  if (raw === false) {
-    model.reasoningEfforts = false
-  } else if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-    const efforts = {}
-    const declared = Object.keys(raw).filter((key) => !THINKING_LEVELS.includes(key))
-    for (const level of [...THINKING_LEVELS, ...declared]) {
-      if (!Object.prototype.hasOwnProperty.call(raw, level)) continue
-      const value = raw[level]
-      // The value is the spelling dispatch sends on the wire (`max: ultra`
-      // renames a level for a gateway with its own vocabulary), so write it
-      // back verbatim; a valueless level stays valueless.
-      efforts[level] = value === null || value === undefined || value === '' ? null : String(value)
-    }
-    if (Object.keys(efforts).length) model.reasoningEfforts = efforts
-  }
-  const reasoning = String(input?.reasoning ?? '').trim()
-  if (reasoning && THINKING_LEVELS.includes(reasoning)) model.reasoning = reasoning
-  return model
-}
-
-export function renderProviderConfig(draft) {
-  const apiKeyEnv = String(draft?.apiKeyEnv ?? '').trim()
-  if (!ENV_NAME_RE.test(apiKeyEnv)) {
-    throw httpError(400, 'error.provider.env', 'apiKeyEnv 需为全大写字母/数字/下划线，例如 WORKBUDY_LAN_API_KEY')
-  }
-  const models = Array.isArray(draft?.models) ? draft.models : []
-  if (!models.length) throw httpError(400, 'error.provider.models', '至少需要保留一个模型')
-  const reasoning = String(draft?.reasoning ?? '').trim()
-  if (reasoning && !THINKING_LEVELS.includes(reasoning)) {
-    throw httpError(400, 'error.provider.reasoning', `未知的默认思考档位：${reasoning}`)
-  }
-  const provider = {
-    apiKeyEnv,
-    api: String(draft?.api ?? '').trim() || 'openai-completions',
-    baseURL: normalizeBaseURL(draft?.baseURL),
-    models: models.map(validateModel),
-  }
-  if (reasoning) provider.reasoning = reasoning
-  return provider
-}
-
 export function readProvidersFromPatch(patchText) {
   let doc
   try {
@@ -985,32 +928,6 @@ function spliceProviderEntry(patchText, providers, id, providerConfig, indentUni
 }
 
 
-export function removeProviderFromPatch(patchText, providerId) {
-  const id = validateProviderId(providerId)
-  const doc = parseYamlDocument(patchText, '配置文件')
-  const entry = findEntry(doc, PROVIDERS_ENTRY_ID)
-  const config = entry ? entry.get('config', true) : null
-  const providers = YAML.isMap(config) ? config.get('providers', true) : null
-  const pair = YAML.isMap(providers)
-    ? providers.items.find((item) => String(nodeToJs(item.key) ?? '') === id)
-    : undefined
-  if (!pair) throw httpError(404, 'error.provider.missing', `未找到供应商：${id}`)
-  if (
-    providers.items.length > 1 &&
-    Array.isArray(pair.key?.range) &&
-    Array.isArray(pair.value?.range)
-  ) {
-    // Delete just this entry's bytes: the remaining groups keep their own
-    // layout instead of being reflowed by a whole-document stringify.
-    const lineStart = patchText.lastIndexOf('\n', pair.key.range[0] - 1) + 1
-    const end = pair.value.range[1]
-    const after = patchText[end - 1] === '\n' ? end : patchText.indexOf('\n', end)
-    return patchText.slice(0, lineStart) + patchText.slice(after === -1 ? patchText.length : after)
-  }
-  providers.items.splice(providers.items.indexOf(pair), 1)
-  return stringifyPatch(doc)
-}
-
 /* --- ~/.dsh/.credentials.yaml -------------------------------------------- */
 //
 // Keys never go into the patch: `apiKeyEnv` names an entry in the credentials
@@ -1034,43 +951,6 @@ export function readCredentialValue(text, name) {
     if (String(nodeToJs(pair.key) ?? '') === String(name)) return String(nodeToJs(pair.value) ?? '').trim()
   }
   return ''
-}
-
-export function mergeCredentialRef(text, name, value) {
-  if (!ENV_NAME_RE.test(String(name ?? ''))) {
-    throw httpError(400, 'error.provider.env', '密钥引用的名字需为全大写字母/数字/下划线')
-  }
-  const secret = String(value ?? '').trim()
-  if (!secret) throw httpError(400, 'error.provider.secret', 'API Key 不能为空')
-  const doc = parseYamlDocument(text, '凭据文件')
-  if (doc.contents == null) doc.contents = doc.createNode({})
-  if (!YAML.isMap(doc.contents)) throw httpError(500, 'error.credentials.shape', '凭据文件顶层不是映射')
-  let refs = doc.contents.get('refs', true)
-  if (refs !== undefined && !YAML.isMap(refs)) {
-    throw httpError(500, 'error.credentials.shape', '凭据文件的 refs 不是映射，已中止以免破坏现有记录')
-  }
-  if (!YAML.isMap(refs)) {
-    refs = doc.createNode({})
-    doc.contents.set('refs', refs)
-  }
-  refs.set(String(name), doc.createNode(secret))
-  return YAML.stringify(doc, { lineWidth: 0 })
-}
-
-/** Returns null when the ref (or the whole refs block) is absent — nothing to write. */
-export function removeCredentialRef(text, name) {
-  const doc = parseYamlDocument(text, '凭据文件')
-  if (!YAML.isMap(doc.contents)) return null
-  const refs = doc.contents.get('refs', true)
-  if (!YAML.isMap(refs)) return null
-  let removed = 0
-  for (let i = refs.items.length - 1; i >= 0; i -= 1) {
-    if (String(nodeToJs(refs.items[i].key) ?? '') === String(name)) {
-      refs.items.splice(i, 1)
-      removed += 1
-    }
-  }
-  return removed ? YAML.stringify(doc, { lineWidth: 0 }) : null
 }
 
 export async function readProviderState(env = process.env) {
@@ -1108,73 +988,43 @@ export async function readProviderState(env = process.env) {
   }
 }
 
-export async function saveProvider(env = process.env, { providerId, previousId, provider, apiKey } = {}) {
-  const id = validateProviderId(providerId)
-  const p = paths(env)
-  const patchText = await readTextFile(p.patchFile, '')
-  const config = renderProviderConfig(provider)
-  let nextPatch = mergeProviderIntoPatch(patchText, id, config)
-  const from = String(previousId ?? '').trim()
-  if (from && from !== id) nextPatch = removeProviderFromPatch(nextPatch, from)
-  validatePatchText(nextPatch)
-
-  let credentialsWritten = false
-  const secret = String(apiKey ?? '').trim()
-  if (secret) {
-    const credentialsText = await readTextFile(p.credentialsFile, 'version: 1\n')
-    const nextCredentials = mergeCredentialRef(credentialsText, config.apiKeyEnv, secret)
-    await writeWithBackup(p.credentialsFile, nextCredentials, 0o600, 3)
-    credentialsWritten = true
-  }
-  await writeWithBackup(p.patchFile, nextPatch, 0o600, 3)
-  return {
-    providerId: id,
-    previousId: from && from !== id ? from : null,
-    modelCount: config.models.length,
-    apiKeyEnv: config.apiKeyEnv,
-    credentialsWritten,
-    patchFile: p.patchFile,
-    credentialsFile: p.credentialsFile,
-  }
-}
-
-export async function deleteProvider(env = process.env, { providerId, dropCredential = false } = {}) {
-  const id = validateProviderId(providerId)
-  const p = paths(env)
-  const patchText = await readTextFile(p.patchFile, '')
-  const { providers } = readProvidersFromPatch(patchText)
-  const target = providers[id]
-  if (!target) throw httpError(404, 'error.provider.missing', `未找到供应商：${id}`)
-  const nextPatch = removeProviderFromPatch(patchText, id)
-  validatePatchText(nextPatch)
-
-  const envName = String(target.apiKeyEnv ?? '')
-  let credentialRemoved = false
-  let credentialInUse = false
-  if (dropCredential && ENV_NAME_RE.test(envName)) {
-    credentialInUse = Object.entries(providers).some(
-      ([other, cfg]) => other !== id && String(cfg?.apiKeyEnv ?? '') === envName,
-    )
-    if (!credentialInUse) {
-      const credentialsText = await readTextFile(p.credentialsFile, '')
-      const nextCredentials = credentialsText ? removeCredentialRef(credentialsText, envName) : null
-      if (nextCredentials) {
-        await writeWithBackup(p.credentialsFile, nextCredentials, 0o600, 3)
-        credentialRemoved = true
-      }
-    }
-  }
-  await writeWithBackup(p.patchFile, nextPatch, 0o600, 3)
-  return { providerId: id, credentialRemoved, credentialInUse, patchFile: p.patchFile }
-}
-
 /* --- thinking unlock ------------------------------------------------------ */
 //
-// "Unlock" is deliberately one-directional. The gateway's capability table is
-// the ceiling: a model the gateway advertises levels for gets exactly those
-// levels declared, and a model the gateway stays silent about is left alone.
-// Nothing here ever removes a level or writes `reasoningEfforts: false`, so a
-// hand-tuned model cannot lose thinking by pressing the button.
+// The gateway's capability table is the truth. A model the gateway advertises
+// levels for gets exactly those levels declared — including dropping a level the
+// config had invented and the gateway does not accept — while a model the gateway
+// stays silent about is left untouched, never written as `reasoningEfforts:
+// false` (that would declare the model non-reasoning). Detection is read-only and
+// never writes; only the unlock pass writes, and only to providers it judged to
+// be a reachable OpenAI-compatible gateway.
+
+/**
+ * Decide whether one configured provider really is an OpenAI-compatible gateway
+ * this page may probe. The judgement is by shape and reachability, not by name,
+ * so a provider is only ever unlocked after it passes this check — and a refused
+ * one carries the reason so the page can show why.
+ */
+export function judgeProvider(config, { credentialNames = [], env = {} } = {}) {
+  const api = String(config?.api ?? '').trim()
+  const baseURL = String(config?.baseURL ?? '').trim()
+  const apiKeyEnv = String(config?.apiKeyEnv ?? '').trim()
+  let parsed = null
+  try {
+    parsed = new URL(baseURL)
+  } catch {
+    parsed = null
+  }
+  if (api && api !== 'openai-completions') {
+    return { verdict: 'skipped', reason: `api 是 ${api}，不是 OpenAI 兼容网关` }
+  }
+  if (!parsed || !/^https?:$/.test(parsed.protocol)) {
+    return { verdict: 'skipped', reason: 'baseURL 不是可探测的 http(s) 地址' }
+  }
+  if (apiKeyEnv && !credentialNames.includes(apiKeyEnv) && !env?.[apiKeyEnv]) {
+    return { verdict: 'skipped', reason: `凭据 ${apiKeyEnv} 不在凭据文件里` }
+  }
+  return { verdict: 'gateway', reason: `OpenAI 兼容网关 ${baseURL}` }
+}
 
 function declaredEfforts(model) {
   const raw = model?.reasoningEfforts
@@ -1257,6 +1107,12 @@ export async function unlockProviderThinking(env = process.env, { providerIds, d
   if (!entryFound) {
     throw httpError(404, 'error.provider.entry', `这个 profile 的 cordis.patch.yml 里没有 - id: ${PROVIDERS_ENTRY_ID} 条目`)
   }
+  let credentialNames = []
+  try {
+    credentialNames = readCredentialNames(credentialsText)
+  } catch {
+    credentialNames = []
+  }
   const wanted = Array.isArray(providerIds) && providerIds.length
     ? providerIds.map((value) => validateProviderId(value))
     : Object.keys(providers)
@@ -1269,20 +1125,30 @@ export async function unlockProviderThinking(env = process.env, { providerIds, d
       results.push({ id, status: 'missing', error: `未找到供应商：${id}` })
       continue
     }
+    const judged = judgeProvider(raw, { credentialNames, env })
+    if (judged.verdict !== 'gateway') {
+      // Not one of the configured gateways: reported, never probed, never written.
+      results.push({
+        id,
+        verdict: 'skipped',
+        status: 'skipped',
+        reason: judged.reason,
+        modelCount: Array.isArray(raw.models) ? raw.models.length : 0,
+      })
+      continue
+    }
     try {
       const envName = String(raw.apiKeyEnv ?? '')
-      const probed = await probeGateway(
-        { baseURL: raw.baseURL, apiKey: envName ? readCredentialValue(credentialsText, envName) : '' },
-        fetchImpl,
-      )
+      const secret = envName ? readCredentialValue(credentialsText, envName) || String(env?.[envName] ?? '') : ''
+      const probed = await probeGateway({ baseURL: raw.baseURL, apiKey: secret }, fetchImpl)
       const { models, report } = unlockPlan(raw.models, probed.models)
       if (dryRun) {
         // Detection only: report what is out of date without touching the file.
-        results.push({ id, status: report.unlocked ? 'pending' : 'current', modelCount: models.length, ...report })
+        results.push({ id, verdict: 'gateway', reason: judged.reason, status: report.unlocked ? 'pending' : 'current', modelCount: models.length, ...report })
         continue
       }
       if (!report.unlocked) {
-        results.push({ id, status: 'current', modelCount: models.length, ...report })
+        results.push({ id, verdict: 'gateway', reason: judged.reason, status: 'current', modelCount: models.length, ...report })
         continue
       }
       // Merge into a temporary first: a provider that fails to render must not
@@ -1290,9 +1156,10 @@ export async function unlockProviderThinking(env = process.env, { providerIds, d
       const merged = mergeProviderIntoPatch(nextPatch, id, { ...raw, models })
       validatePatchText(merged)
       nextPatch = merged
-      results.push({ id, status: 'unlocked', modelCount: models.length, ...report })
+      results.push({ id, verdict: 'gateway', reason: judged.reason, status: 'unlocked', modelCount: models.length, ...report })
     } catch (err) {
-      results.push({ id, status: 'error', error: err?.message || String(err) })
+      const message = err?.message || String(err)
+      results.push({ id, verdict: 'unreachable', status: 'error', reason: `探测失败：${message}`, error: message })
     }
   }
 
@@ -1306,6 +1173,9 @@ export async function unlockProviderThinking(env = process.env, { providerIds, d
     dryRun: !!dryRun,
     changed,
     providers: results,
+    scannedProviders: results.length,
+    gatewayProviders: results.filter((r) => r.verdict === 'gateway').map((r) => r.id),
+    skippedProviders: results.filter((r) => r.verdict === 'skipped').map((r) => r.id),
     unlockedProviders: results.filter((r) => (r.unlocked || 0) > 0).map((r) => r.id),
     unlockedModels: results.reduce((total, r) => total + (r.unlocked || 0), 0),
   }

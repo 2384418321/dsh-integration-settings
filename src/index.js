@@ -20,10 +20,7 @@ import {
   readPersonaBackup,
   savePersona,
   readProviderState,
-  saveProvider,
-  deleteProvider,
   unlockProviderThinking,
-  probeGateway,
   httpError,
 } from './core.js'
 
@@ -233,12 +230,6 @@ async function skillListResponse(ctx, req, url) {
   return { rootId, rootPath, list: await listSkills(rootPath) }
 }
 
-// The probe is the only call that ever holds an API key typed into the form; it
-// runs host-side so the key never has to round-trip through a saved file first.
-async function probeProviderGateway(body) {
-  return probeGateway({ baseURL: body && body.baseURL, apiKey: body && body.apiKey })
-}
-
 async function handle(ctx, req, res) {
   const url = new URL(req.url || '/', 'http://localhost')
   const route = url.pathname.replace(/\/+$/, '').slice(API_PREFIX.length) || '/'
@@ -293,12 +284,8 @@ async function handle(ctx, req, res) {
     }
     case 'GET /provider/list':
       return json(res, 200, { ok: true, data: await readProviderState(process.env) })
-    case 'POST /provider/probe':
-      return json(res, 200, { ok: true, data: await probeProviderGateway(body) })
-    case 'POST /provider/save':
-      return json(res, 200, { ok: true, data: await saveProvider(process.env, body || {}) })
-    case 'POST /provider/delete':
-      return json(res, 200, { ok: true, data: await deleteProvider(process.env, body || {}) })
+    // Read-only list + the unlock pass. Provider add/edit/delete is deliberately
+    // not exposed: this page detects gateways and unlocks thinking, nothing else.
     case 'POST /provider/unlock':
       return json(res, 200, { ok: true, data: await unlockProviderThinking(process.env, body || {}) })
     default:

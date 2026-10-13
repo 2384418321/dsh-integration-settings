@@ -16,7 +16,7 @@ into point-and-click operations:
 | **MCP servers** | add / remove / edit / enable–disable MCP servers | the current profile's `cordis.patch.yml` (managed block) + `.dsh-integration/mcp.json` (source of truth) |
 | **Skills** | browse / create / edit / delete skills | DSH global, shared `.agents`, Claude / Codex global directories, plus the current project's `.dsh` / `.agents` / `.claude` directories |
 | **Global persona** | visually edit the persona file (the equivalent of Claude Code's `CLAUDE.md`) | `$DSH_HOME/AGENTS.md` (global) and `<project>/AGENTS.md` (current project) |
-| **Thinking unlock** | detects each gateway's supported thinking levels on page open and unlocks them in one click; also add / edit / delete OpenAI-compatible gateways and pull model lists | the current profile's `cordis.patch.yml` (the `llm-pi-ai` entry's `config.providers`) + `$DSH_HOME/.credentials.yaml` (`refs`, secrets only) |
+| **Thinking unlock** | detects each gateway's real thinking levels on page open and unlocks them in one click | the current profile's `cordis.patch.yml` (the `llm-pi-ai` entry's `config.providers`) + `$DSH_HOME/.credentials.yaml` (`refs`, secrets only) |
 
 > This is a community plugin, not an official DeepSeek product. Evaluate it yourself before
 > installing, and consider backing up your profile directory first.
@@ -150,98 +150,56 @@ patch.**
 - If the profile patch file is still the template's empty `[]` placeholder, the plugin drops that line
   before writing the managed block, avoiding invalid YAML such as `Unexpected seq-item-ind token`.
 
-### Thinking unlock (and model providers)
+### Thinking unlock
+
 DSH providers live in `@deepseek-ai/dsh-llm-pi-ai`'s `config.providers`, written into each profile's
 `cordis.patch.yml`. A declared `reasoningEfforts` dict is a **whitelist**: levels you do not declare
 show up greyed out in the model picker, so "can I pick High / Max on this model?" is decided entirely
-by those few dozen lines of YAML. This page automates that.
+by those few dozen lines of YAML. This page does exactly one thing: **auto-detect + one-click unlock**.
 
-**Auto-detect + one-click unlock**
+**Auto-detect (read-only, writes nothing)**
 
-- **Detected on page open**: the page sends one read-only `GET /models` per configured gateway, reads
-  `reasoning_supported_efforts` / `can_disable_thinking` and diffs it against the current config.
-  Detection **writes nothing**; the page shows "N to unlock / M already current / K gateway-silent".
-- **One click to unlock**: "Unlock all" writes the levels back to `cordis.patch.yml`, with a backup
-  first. **The gateway's capability table is the only truth** — if it says a model only supports
-  `medium`, only `medium` is declared, and levels your config had on top of that are dropped. Before
-  unlocking, the page lists every such model with its `old levels → new levels`.
-- **Only the gateways in this entry**: only providers under `- id: llm-pi-ai`'s `config.providers` are
-  read or rewritten. DSH's built-in `deepseek-official` / `deepseek-account` do not live in this file.
+- **Detected on page open**: the page sends one read-only `GET /models` per provider it judges to be a
+  gateway, reads `reasoning_supported_efforts` / `can_disable_thinking` and diffs it against the
+  current config. The page shows "N to unlock / M already current / K gateway-silent / G no longer
+  offered". Detection **writes nothing**.
+- **Judged by shape, not by name**: a provider is probed only when all three hold — `api` is empty or
+  `openai-completions`; `baseURL` is an http(s) URL; the `apiKeyEnv` credential is present in
+  `$DSH_HOME/.credentials.yaml`'s `refs:` (or as an environment variable of that name). Everything
+  else is listed with its **skip reason** (`api` is not OpenAI-compatible / address unparseable /
+  credential missing) and is neither probed nor rewritten.
+- **Only this entry's `config.providers`**: nothing outside `- id: llm-pi-ai` is read or written.
+  DSH's built-in `deepseek-official` / `deepseek-account` do not live in this file.
+- **"Show models"** expands a provider's **read-only** model list, showing what each model currently
+  declares and what the gateway wants instead (including which levels would be dropped).
+
+**One-click unlock**
+
+- "Unlock all" writes the levels into `cordis.patch.yml`, with a backup first. **The gateway's
+  capability table is the only truth** — if it says a model only supports `medium`, only `medium` is
+  declared, and levels your config had on top of that are dropped. Before unlocking, the page lists
+  every such model with its `old levels → new levels`.
 - **A silent gateway changes nothing**: when the gateway reports no thinking information for a model,
   your existing declaration is kept — the plugin never writes `reasoningEfforts: false` for you, which
-  would declare the model non-reasoning.
+  would declare the model non-reasoning. Models the gateway no longer offers are kept verbatim too.
 - **One failing gateway does not block the rest**: it is reported separately, the others still unlock.
-
-**The form (add / edit / delete a gateway)**
-
-- DSH has no built-in way to add a provider: a provider only exists as a `config.providers` entry
-  inside `- id: llm-pi-ai`, so this page merges into that existing entry. Adding a second entry with
-  the same id makes DSH fail at startup (dedupe with `dev_fix_patch`); when the entry is missing the
-  page shows an amber banner.
-- Edits go through a YAML **document** (parse → mutate nodes → stringify) instead of
-  `parse → JS → stringify`, so comments and the other entries survive untouched.
-- **Each provider keeps its own bytes**: saving one provider replaces only that provider's byte range,
-  so a hand-written group keeps its layout verbatim — flow lists (`input: [ "text", "image" ]`),
-  quoted scalars and `reasoningEfforts: false` (declaring a non-reasoning model) are neither reflowed
-  nor dropped. Re-saving a provider unchanged leaves the file byte-identical, and deleting removes only
-  that entry's bytes.
-- **Secrets never go into the patch**: `apiKeyEnv` is only a reference name; the secret itself is
-  written to the `refs:` section of `$DSH_HOME/.credentials.yaml`. The apiKey field is only needed when
-  adding a provider or rotating a key — leave it empty to keep the stored secret.
+- **Each provider keeps its own bytes**: writing replaces only that provider's byte range, so every
+  other group keeps its layout verbatim — flow lists (`input: [ "text", "image" ]`), quoted scalars and
+  `reasoningEfforts: false` (declaring a non-reasoning model) are neither reflowed nor dropped. With
+  nothing to change, the file stays byte-identical.
 - **`off` must stay quoted** (`"off":`) because YAML 1.1 parses a bare `off:` as boolean `false`, which
   would give the level dict a non-string key.
-- Saving, unlocking and deleting all write a `.bak-<timestamp>` backup (3 kept) and both files are
-  written `0600`.
+- Unlocking writes a `.bak-<timestamp>` backup (3 kept) and the file is written `0600`.
 
-Restart DSH for changes to take effect; before restarting you can check each model with `de_models`.
+**What this page does not do**
 
-### Which profile is being edited?
-Resolution order, preferring evidence over guesses (authoritative → explicit → inferred):
+- **It never adds, edits or deletes a provider, and never writes a secret.** The host exposes only two
+  routes: `GET /provider/list` (read-only state) and `POST /provider/unlock` (the unlock write). The
+  page's only buttons are "Unlock all" and "Re-detect". To add a gateway, edit `cordis.patch.yml`.
+- When nothing is out of date, the page performs no write at all.
 
-1. the host service `ctx.get('desktopProfiles').current.dir` (in the desktop app this is the profile
-   actually in use — the most authoritative source);
-2. the `DSH_PROFILE_DIR` environment variable;
-3. a `--profile <name>` / `--profile=<name>` argument or the `DSH_PROFILE` environment variable (that
-   profile directory must exist);
-4. scanning `$DSH_HOME/profiles/*` for the **only** profile that has this plugin in its dependencies;
-5. when several candidates remain, `desktop` wins; if it still cannot be determined uniquely the plugin
-   reports `ambiguous_profile` and asks you to specify one instead of writing blindly.
-
-The profile badge at the top of the page confirms the current target.
-
-### The seat pitfall in the Settings page (read this before changing the plugin)
-`settings.section` is a **root-scope** slot. The shell passes each entry a whole set of seat shares:
-`usePanelInfo`, `useSessions`, `useSessionStatus`, `useWorkspaces`, `useResource`,
-`useSessionRetainInfo`, `renderFactorySlot`, `t`, `close`.
-
-- **Calling those `use*` functions from a root-scope entry throws** (they belong to session scope).
-  If you swallow the exception in a `try/catch`, React's hook chain is already misaligned and the
-  **next render** throws `Minified React error #311` at the component's first `useState`; the shell has
-  a per-entry error boundary that replaces the whole slot with
-  `<div data-slot-error="settings.section"></div>` — what the user sees is "clicked in, blank page".
-  So: **root-scope entries must never call any seat hook**, only ordinary props (this plugin's
-  `sessionIdOf` merely reads `props.sessionId`).
-- Never let the hook call order depend on the shape of props either (props changing on the second
-  render → "more/fewer hooks than during the previous render", again a blank page).
-- `test/client-hooks.test.js` guards exactly these two rules: it drives the component function with a
-  counting version of React and asserts that no seat session hook is ever called and that the hook
-  sequence is identical under two different prop sets. Do not work around it when changing the
-  component.
-- When you need to debug something a single render cannot reveal, `renderToString` will not catch hook
-  order changes; instead run `DSI_DEBUG=1 node scripts/build.mjs` to get an **unminified client bundle
-  with function names kept and an inline sourcemap**, then open the real GUI in headless Chrome and read
-  the console stack (function names such as `McpSection` appear directly in it).
-
-### Skills
-A skill is a `SKILL.md` inside a directory, with YAML frontmatter (`name` in kebab-case plus
-`description`). Deleting removes the whole directory; the previous `SKILL.md` is backed up before any
-write, and directory names are protected against `../` escapes.
-
-### Global persona
-DSH's `@deepseek-ai/dsh-agent-instructions` plugin injects a baseline into the first request of every
-session: `$DSH_HOME/AGENTS.md` (your persona) plus the project chain (from the project root down to the
-session cwd: `AGENTS.md`/`CLAUDE.md` and `AGENTS.local.md`/`CLAUDE.local.md`). This page is an editor
-for that global file, and lists the 3 most recent backups for one-click restore.
+Restart DSH for the new levels to reach the model picker; before restarting you can check each model
+with `de_models`.
 
 ## Security boundary
 
@@ -265,13 +223,13 @@ The host side registers a single loopback HTTP route, `/api/dsh-integration`:
 pnpm install                    # first time
 node scripts/build.mjs          # esbuild: src/index.js -> lib/index.js, src/client.jsx -> lib/client.js
 DSI_DEBUG=1 node scripts/build.mjs   # debug build: client bundle unminified, names kept, inline sourcemap
-node --test test/*.test.js      # 30 tests (the glob is required; node --test test/ treats the dir as a module)
+node --test test/*.test.js      # 53 tests (the glob is required; node --test test/ treats the dir as a module)
 ```
 
 - `test/core.test.js`: managed-block generation/replacement/idempotency, `!!js` tag round-trips, the
   empty `[]` placeholder, server validation, skill CRUD (including `../` escape rejection), persona
   backup rotation and reading.
-- `test/host.test.js`: starts a **real HTTP server against the built output** and covers the 10 routes
+- `test/host.test.js`: starts a **real HTTP server against the built output** and covers the 11 routes
   plus the three security fences.
 - `test/client.test.js`: loads the client bundle the way `window.__ModuleLoader__.load` really does and
   asserts the three `settings.section` registrations (including the no-locale-service case and the
@@ -280,6 +238,9 @@ node --test test/*.test.js      # 30 tests (the glob is required; node --test te
   seed with its `as()` semantics, asserting all three pages render non-empty DOM.
 - `test/client-hooks.test.js`: white-box regression for hook order and seat hooks (see the section
   above).
+- `test/providers.test.js`: gateway judging (`judgeProvider`) and `/models` probing, the `unlockPlan`
+  pure function, unlock writes and backups, `dryRun` leaving the file alone, skipped non-gateways and
+  missing credentials, and the `"off"`-quoting / `false` round trip.
 
 Debug helper: run `localStorage.dsiDebug = '1'` in the browser console and reload to **print the seat
 share prop names once** (silent by default, so normal users' consoles stay clean).
