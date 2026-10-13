@@ -191,6 +191,11 @@ DSH 的模型供应商由 `@deepseek-ai/dsh-llm-pi-ai` 的 `config.providers` �
 - **思考档位自动映射**：网关 `GET /models` 返回的 `reasoning_supported_efforts` 会转成 pi-ai 的
   `reasoningEfforts` 字典。注意 `off` 必须写成带引号的 `"off":`——YAML 1.1 会把裸 `off:` 解析成
   布尔 `false`，档位字典的键类型就错了。
+- **兼容手写分组**：页面对 `providers:` 下每个供应商只改自己那一段字节，不改动的分组会**逐字节
+  原样保留**——手写的流式列表（`input: [ "text", "image" ]`）、带引号的标量、以及
+  `reasoningEfforts: false`（声明「不支持思考」的模型）都不会被重排或丢掉。把某个供应商原样
+  保存回去时文件零变化。注意：`reasoningEfforts` 一旦声明就是白名单，**未声明的档位即不可选**；
+  `false` 表示该模型不支持思考，`{}` 和不写都表示「沿用网关目录里的能力」。
 - 保存/删除都会写 `.bak-<时间戳>` 备份（各保留最近 3 份），两个文件权限都按 `0600` 写。
 
 改完需**重启 DSH** 才会在模型选择器里出现；重启前可用 `de_models` 核对每个模型是否带上了

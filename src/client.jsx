@@ -728,6 +728,39 @@ const EMPTY_PROVIDER = {
 }
 const LEVEL_ORDER = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
+/**
+ * Label for one model's declared thinking levels. `reasoningEfforts: false` is
+ * the documented "this model does not reason" declaration, so it is spelled out
+ * rather than shown as "nothing declared".
+ */
+function describeEfforts(model) {
+  const efforts = model && model.reasoningEfforts
+  if (efforts === false) return '思考 不支持'
+  if (!efforts || typeof efforts !== 'object') return null
+  const keys = Object.keys(efforts)
+  return keys.length ? `思考 ${keys.join('/')}` : null
+}
+
+/** `档位 medium/high/low · 10 个模型不支持思考` summary for a whole provider. */
+function summarizeEfforts(models) {
+  const list = Array.isArray(models) ? models : []
+  const levels = []
+  let none = 0
+  let silent = 0
+  for (const model of list) {
+    const efforts = model && model.reasoningEfforts
+    if (efforts === false) { none += 1; continue }
+    if (!efforts || typeof efforts !== 'object' || !Object.keys(efforts).length) { silent += 1; continue }
+    for (const level of Object.keys(efforts)) if (!levels.includes(level)) levels.push(level)
+  }
+  levels.sort((a, b) => LEVEL_ORDER.indexOf(a) - LEVEL_ORDER.indexOf(b))
+  const parts = []
+  if (levels.length) parts.push(`档位 ${levels.join('/')}`)
+  if (none) parts.push(`${none} 个模型不支持思考`)
+  if (silent) parts.push(`${silent} 个未声明`)
+  return parts.join(' · ')
+}
+
 function suggestEnvName(id) {
   const base = String(id || '').toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
   return base ? `${base}_API_KEY` : ''
@@ -788,7 +821,7 @@ function ProviderEditor({ draft, setDraft, saving, probing, isNew, onCancel, onS
             [
               model.contextWindow ? `ctx ${model.contextWindow}` : null,
               model.maxTokens ? `max ${model.maxTokens}` : null,
-              model.reasoningEfforts ? `思考 ${Object.keys(model.reasoningEfforts).join('/')}` : null,
+              describeEfforts(model),
             ].filter(Boolean).join(' · ')),
         )),
       )
@@ -932,7 +965,12 @@ function ProviderSection(props) {
               provider.hasCredential ? '密钥已配置' : '缺少密钥')
             : null),
         h('div', { className: 'dsi-row-meta' },
-          `${provider.baseURL || '(未设置 baseURL)'} · ${provider.apiKeyEnv || '(未设置 apiKeyEnv)'}${provider.reasoning ? ` · 默认思考 ${provider.reasoning}` : ''}`),
+          [
+            provider.baseURL || '(未设置 baseURL)',
+            provider.apiKeyEnv || '(未设置 apiKeyEnv)',
+            provider.reasoning ? `默认思考 ${provider.reasoning}` : null,
+            summarizeEfforts(provider.models) || null,
+          ].filter(Boolean).join(' · ')),
       ),
       h('div', { className: 'dsi-toolbar' },
         h(Button, { disabled: busy || !!draft, onClick: () => startEdit(provider) }, '编辑'),

@@ -828,12 +828,22 @@ export function validateModel(input) {
   const kinds = (Array.isArray(input?.input) ? input.input : ['text']).map((v) => String(v))
   model.input = kinds.filter((v) => v === 'text' || v === 'image')
   if (!model.input.length) model.input = ['text']
+  // `reasoningEfforts: false` is the documented spelling for "this model does
+  // not reason" — a declaration, not an absent value, so it must survive a
+  // round trip instead of being dropped.
   const raw = input?.reasoningEfforts
-  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+  if (raw === false) {
+    model.reasoningEfforts = false
+  } else if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
     const efforts = {}
-    for (const level of THINKING_LEVELS) {
+    const declared = Object.keys(raw).filter((key) => !THINKING_LEVELS.includes(key))
+    for (const level of [...THINKING_LEVELS, ...declared]) {
       if (!Object.prototype.hasOwnProperty.call(raw, level)) continue
-      efforts[level] = level === 'off' ? null : String(raw[level] ?? '')
+      const value = raw[level]
+      // The value is the spelling dispatch sends on the wire (`max: ultra`
+      // renames a level for a gateway with its own vocabulary), so write it
+      // back verbatim; a valueless level stays valueless.
+      efforts[level] = value === null || value === undefined || value === '' ? null : String(value)
     }
     if (Object.keys(efforts).length) model.reasoningEfforts = efforts
   }
@@ -884,6 +894,38 @@ export function readProvidersFromPatch(patchText) {
   return { entryFound: true, providers }
 }
 
+/** Leading whitespace of the line `offset` falls on. */
+function indentAt(text, offset) {
+  const lineStart = text.lastIndexOf('\n', Math.max(0, offset - 1)) + 1
+  const match = /^[ \t]*/.exec(text.slice(lineStart, offset))
+  return match ? match[0] : ''
+}
+
+/**
+ * One provider entry rendered on its own: the `id:` key line plus the body
+ * lines, still carrying stringify's relative indentation.
+ */
+function renderProviderEntry(id, providerConfig, indentUnit) {
+  const doc = new YAML.Document()
+  doc.contents = doc.createNode({ [id]: providerConfig })
+  quoteAmbiguousKeys(doc.contents)
+  const text = YAML.stringify(doc, { lineWidth: 0, indent: indentUnit })
+    .replace(/"off": null/g, '"off":')
+    .replace(/\n+$/, '')
+  const lines = text.split('\n')
+  if (lines.length < 2) return null
+  return { keyLine: lines[0], body: lines.slice(1) }
+}
+
+/**
+ * Rewrite exactly one provider, leaving the rest of the file byte-for-byte
+ * alone.
+ *
+ * `YAML.stringify` would reflow the *whole* file, and hand-written groups use
+ * their own layout (flow lists, quoted scalars), so an edit to one provider
+ * would otherwise show up as a diff across every other provider. Splicing over
+ * the byte range the old entry occupied keeps everyone else's formatting.
+ */
 export function mergeProviderIntoPatch(patchText, providerId, providerConfig) {
   const id = validateProviderId(providerId)
   const doc = parseYamlDocument(patchText, '配置文件')
@@ -894,11 +936,54 @@ export function mergeProviderIntoPatch(patchText, providerId, providerConfig) {
     return stringifyPatch(next)
   }
   const providers = providerMapFor(doc, entry)
+  const indentUnit = 2
+  const spliced = spliceProviderEntry(patchText, providers, id, providerConfig, indentUnit)
+  if (spliced !== null) return spliced
   const node = doc.createNode(providerConfig)
   quoteAmbiguousKeys(node)
   providers.set(id, node)
   return stringifyPatch(doc)
 }
+
+/** Order-insensitive rendering used to detect a save that changed nothing. */
+function stableShape(value) {
+  if (Array.isArray(value)) return `[${value.map(stableShape).join(',')}]`
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableShape(value[key])}`)
+      .join(',')}}`
+  }
+  return JSON.stringify(value ?? null)
+}
+
+function spliceProviderEntry(patchText, providers, id, providerConfig, indentUnit) {
+  if (!providerConfig || typeof providerConfig !== 'object') return null
+  const pair = providers.items.find((item) => String(nodeToJs(item.key) ?? '') === id)
+  const snippet = renderProviderEntry(id, providerConfig, indentUnit)
+  if (pair) {
+    const value = pair.value
+    // Saving a provider without touching it must not rewrite the file at all.
+    if (stableShape(nodeToJs(value)) === stableShape(providerConfig)) return patchText
+    if (!snippet || !YAML.isMap(value) || !Array.isArray(value.range) || !Array.isArray(pair.key?.range)) return null
+    const pad = indentAt(patchText, pair.key.range[0])
+    const [start, end] = value.range
+    // The text just before the value already carries the first line's indent, so
+    // only the body's own relative indentation is added back; trailing newlines
+    // belong to the range, so they are carried over verbatim.
+    const trailing = /\n+$/.exec(patchText.slice(start, end))?.[0] ?? ''
+    const body = [snippet.body[0].slice(indentUnit), ...snippet.body.slice(1).map((line) => pad + line)]
+    return patchText.slice(0, start) + body.join('\n') + trailing + patchText.slice(end)
+  }
+  if (!snippet || !Array.isArray(providers.range) || !providers.items.length) return null
+  const pad = indentAt(patchText, providers.items[0].key.range[0])
+  const end = providers.range[1]
+  const at = patchText[end - 1] === '\n' ? end : patchText.indexOf('\n', end)
+  const insertAt = at === -1 ? patchText.length : at
+  const block = `${pad}${snippet.keyLine}\n${snippet.body.map((line) => pad + line).join('\n')}\n`
+  return patchText.slice(0, insertAt) + block + patchText.slice(insertAt)
+}
+
 
 export function removeProviderFromPatch(patchText, providerId) {
   const id = validateProviderId(providerId)
@@ -906,16 +991,23 @@ export function removeProviderFromPatch(patchText, providerId) {
   const entry = findEntry(doc, PROVIDERS_ENTRY_ID)
   const config = entry ? entry.get('config', true) : null
   const providers = YAML.isMap(config) ? config.get('providers', true) : null
-  let removed = 0
-  if (YAML.isMap(providers)) {
-    for (let i = providers.items.length - 1; i >= 0; i -= 1) {
-      if (String(nodeToJs(providers.items[i].key) ?? '') === id) {
-        providers.items.splice(i, 1)
-        removed += 1
-      }
-    }
+  const pair = YAML.isMap(providers)
+    ? providers.items.find((item) => String(nodeToJs(item.key) ?? '') === id)
+    : undefined
+  if (!pair) throw httpError(404, 'error.provider.missing', `未找到供应商：${id}`)
+  if (
+    providers.items.length > 1 &&
+    Array.isArray(pair.key?.range) &&
+    Array.isArray(pair.value?.range)
+  ) {
+    // Delete just this entry's bytes: the remaining groups keep their own
+    // layout instead of being reflowed by a whole-document stringify.
+    const lineStart = patchText.lastIndexOf('\n', pair.key.range[0] - 1) + 1
+    const end = pair.value.range[1]
+    const after = patchText[end - 1] === '\n' ? end : patchText.indexOf('\n', end)
+    return patchText.slice(0, lineStart) + patchText.slice(after === -1 ? patchText.length : after)
   }
-  if (!removed) throw httpError(404, 'error.provider.missing', `未找到供应商：${id}`)
+  providers.items.splice(providers.items.indexOf(pair), 1)
   return stringifyPatch(doc)
 }
 

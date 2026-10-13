@@ -14,6 +14,7 @@ otherwise hand-edit in files become point-and-click operations:
 | **MCP servers** | add / remove / edit / enable–disable MCP servers | the current profile's `cordis.patch.yml` (managed block) + `.dsh-integration/mcp.json` (source of truth) |
 | **Skills** | browse / create / edit / delete skills | DSH global, shared `.agents`, Claude / Codex global directories, plus the current project's `.dsh` / `.agents` / `.claude` directories |
 | **Global persona** | visually edit the persona file (the equivalent of Claude Code's `CLAUDE.md`) | `$DSH_HOME/AGENTS.md` (global) and `<project>/AGENTS.md` (current project) |
+| **Model providers** | add / edit / delete OpenAI-compatible gateway providers, pulling the model list and thinking levels | the current profile's `cordis.patch.yml` (the `llm-pi-ai` entry's `config.providers`) + `$DSH_HOME/.credentials.yaml` (`refs`, secrets only) |
 
 > This is a community plugin, not an official DeepSeek product. Evaluate it yourself before
 > installing, and consider backing up your profile directory first.
@@ -146,6 +147,30 @@ patch.**
   stay plain; reading them back yields strings again, so the round-trip is lossless.
 - If the profile patch file is still the template's empty `[]` placeholder, the plugin drops that line
   before writing the managed block, avoiding invalid YAML such as `Unexpected seq-item-ind token`.
+
+### Model providers
+- DSH has no built-in way to add a provider: a provider only exists as a `config.providers` entry
+  inside `- id: llm-pi-ai`, so this page merges into that existing entry. Adding a second entry with
+  the same id makes DSH fail at startup (dedupe with `dev_fix_patch`); when the entry is missing the
+  page shows an amber banner.
+- Edits go through a YAML **document** (parse → mutate nodes → stringify) instead of
+  `parse → JS → stringify`, so comments and the other entries survive untouched.
+- **Each provider keeps its own bytes**: saving one provider replaces only that provider's byte range,
+  so a hand-written group keeps its layout verbatim — flow lists (`input: [ "text", "image" ]`),
+  quoted scalars and `reasoningEfforts: false` (declaring a non-reasoning model) are neither reflowed
+  nor dropped. Re-saving a provider unchanged leaves the file byte-identical, and deleting removes only
+  that entry's bytes.
+- **Secrets never go into the patch**: `apiKeyEnv` is only a reference name; the secret itself is
+  written to the `refs:` section of `$DSH_HOME/.credentials.yaml`. The apiKey field is only needed when
+  adding a provider or rotating a key — leave it empty to keep the stored secret.
+- **Thinking levels are mapped automatically** from the gateway's `reasoning_supported_efforts`. Note
+  that `off` must be quoted (`"off":`) because YAML 1.1 parses a bare `off:` as boolean `false`. A
+  declared `reasoningEfforts` dict is a whitelist — undeclared levels are not selectable; `false` means
+  the model does not support thinking; `{}` and omitting the field both keep whatever the installed
+  catalog declares.
+- Saving and deleting both write a `.bak-<timestamp>` backup (3 kept) and both files are written `0600`.
+
+Restart DSH for changes to take effect; before restarting you can check each model with `de_models`.
 
 ### Which profile is being edited?
 Resolution order, preferring evidence over guesses (authoritative → explicit → inferred):

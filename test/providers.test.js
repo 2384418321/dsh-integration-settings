@@ -249,8 +249,91 @@ test('validateModel normalizes effort maps and rejects an empty id', () => {
   const model = validateModel({ id: ' m ', name: '', input: ['image', 'bogus'], reasoningEfforts: { off: null, high: 'high' } })
   assert.deepEqual(model, { id: 'm', name: 'm', input: ['image'], reasoningEfforts: { off: null, high: 'high' } })
   assert.throws(() => validateModel({ id: '  ' }), /模型 id 不能为空/)
-  // an unknown level id in the draft is discarded rather than written
-  assert.equal(validateModel({ id: 'm', reasoningEfforts: { turbo: 'turbo' } }).reasoningEfforts, undefined)
+})
+
+test('validateModel keeps every declared effort level, including `false`', () => {
+  // `false` is the documented spelling for "this model does not reason": it is a
+  // declaration, so a save must not turn it into an absent field.
+  assert.equal(validateModel({ id: 'm', reasoningEfforts: false }).reasoningEfforts, false)
+  // A declared value is the wire spelling the gateway receives, so rewriting it
+  // (e.g. forcing `off` to null) would silently change dispatch behaviour.
+  assert.deepEqual(
+    validateModel({ id: 'm', reasoningEfforts: { off: 'skip', max: 'ultra' } }).reasoningEfforts,
+    { off: 'skip', max: 'ultra' },
+  )
+  // An unknown level id is preserved rather than silently discarded.
+  assert.deepEqual(validateModel({ id: 'm', reasoningEfforts: { turbo: 'turbo' } }).reasoningEfforts, { turbo: 'turbo' })
+  assert.equal(validateModel({ id: 'm', reasoningEfforts: {} }).reasoningEfforts, undefined)
+})
+
+test('a provider mixing `false` and dict effort maps survives a patch round trip', () => {
+  const config = renderProviderConfig({
+    apiKeyEnv: 'WORKBUDY_LAN_API_KEY',
+    baseURL: 'http://192.168.2.202:7863/v1',
+    models: [
+      { id: 'cn:glm-4.6', name: 'GLM-4.6', contextWindow: 168000, maxTokens: 32000, input: ['text', 'image'], reasoningEfforts: false },
+      { id: 'cn:auto', name: 'Auto', input: ['text'], reasoningEfforts: { high: 'high' } },
+      { id: 'cn:plain', name: 'Plain', input: ['text'] },
+    ],
+  })
+  const next = mergeProviderIntoPatch(PATCH_FIXTURE, 'workbudy-lan', config)
+  assert.match(next, /reasoningEfforts: false/)
+  const back = readProvidersFromPatch(next).providers['workbudy-lan']
+  assert.equal(back.models[0].reasoningEfforts, false)
+  assert.deepEqual(back.models[1].reasoningEfforts, { high: 'high' })
+  assert.equal(back.models[2].reasoningEfforts, undefined)
+  // the untouched provider in the same file keeps its shape
+  assert.deepEqual(readProvidersFromPatch(next).providers.workbudy.models[0].id, 'cn:auto')
+})
+
+test('editing one provider leaves the other groups byte-identical', () => {
+  // `hand` is written the way a person writes it (flow list, quoted scalars,
+  // `reasoningEfforts: false` for its non-reasoning model); `mine` is canonical.
+  const text = [
+    '- id: llm-pi-ai',
+    "  name: '@deepseek-ai/dsh-llm-pi-ai'",
+    '  config:',
+    '    providers:',
+    '      hand:',
+    '        apiKeyEnv: HAND_KEY',
+    '        api: openai-completions',
+    '        baseURL: http://hand/v1',
+    '        models:',
+    '          - id: a',
+    '            name: "A"',
+    '            input: [ "text", "image" ]',
+    '            reasoningEfforts: false',
+    '      mine:',
+    '        apiKeyEnv: MINE_KEY',
+    '        api: openai-completions',
+    '        baseURL: http://mine/v1',
+    '        models:',
+    '          - id: b',
+    '            name: B',
+    '            input:',
+    '              - text',
+    '',
+  ].join('\n')
+  const out = mergeProviderIntoPatch(text, 'mine', {
+    apiKeyEnv: 'MINE_KEY',
+    api: 'openai-completions',
+    baseURL: 'http://mine/v1',
+    models: [{ id: 'b', input: ['text'] }, { id: 'c', input: ['text'] }],
+  })
+  assert.ok(out.includes('            name: "A"'), 'kept the quoted scalar')
+  assert.ok(out.includes('            input: [ "text", "image" ]'), 'kept the flow list')
+  assert.ok(out.includes('            reasoningEfforts: false'), 'kept the non-reasoning declaration')
+  const back = readProvidersFromPatch(out).providers
+  assert.equal(back.hand.models[0].reasoningEfforts, false)
+  assert.deepEqual(back.mine.models.map((m) => m.id), ['b', 'c'])
+  // the edited group really is rewritten
+  assert.ok(out.includes('          - id: c'))
+})
+
+test('saving a provider unchanged rewrites nothing', () => {
+  const { providers } = readProvidersFromPatch(PATCH_FIXTURE)
+  const out = mergeProviderIntoPatch(PATCH_FIXTURE, 'workbudy', renderProviderConfig(providers.workbudy))
+  assert.equal(out, PATCH_FIXTURE)
 })
 
 test('renderProviderConfig enforces the env name and model count', () => {
