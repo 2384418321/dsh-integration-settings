@@ -21,6 +21,7 @@ import {
   savePersona,
   readProviderState,
   saveProvider,
+  probeGateway,
   unlockProviderThinking,
   httpError,
 } from './core.js'
@@ -285,8 +286,14 @@ async function handle(ctx, req, res) {
     }
     case 'GET /provider/list':
       return json(res, 200, { ok: true, data: await readProviderState(process.env) })
-    // Read-only list + the unlock pass. Provider add/edit/delete is deliberately
-    // not exposed: this page detects gateways and unlocks thinking, nothing else.
+    // Read-only list, the unlock pass, and gateway add/edit. There is deliberately
+    // no delete and no rename: a mis-click can never drop a gateway.
+    case 'POST /provider/probe':
+      // Feeds the "add gateway" editor by pulling /v1/models. Writes nothing.
+      return json(res, 200, {
+        ok: true,
+        data: await probeGateway({ baseURL: (body || {}).baseURL, apiKey: (body || {}).apiKey }),
+      })
     case 'POST /provider/save':
       return json(res, 200, { ok: true, data: await saveProvider(process.env, body || {}) })
     case 'POST /provider/unlock': {

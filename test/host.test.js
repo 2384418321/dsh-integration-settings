@@ -154,8 +154,8 @@ test('host API: state, MCP lifecycle, fences, skills and persona', async (t) => 
   assert.equal(res.status, 200, 'global scope wins even when a cwd is present')
 
   // ---- thinking unlock ----------------------------------------------------
-  // The page detects gateways and unlocks thinking levels. Provider add / edit /
-  // Add and edit are back; delete is deliberately never exposed.
+  // The page detects gateways and unlocks thinking levels; add and edit are back,
+  // delete is deliberately never exposed.
   res = await call(host, '/provider/list')
   assert.equal(res.status, 200)
   assert.equal(res.json.data.entryFound, false, 'this profile has no llm-pi-ai entry yet')
@@ -168,6 +168,13 @@ test('host API: state, MCP lifecycle, fences, skills and persona', async (t) => 
   res = await call(host, '/provider/save', { method: 'POST', body: { providerId: 'workbudy' } })
   assert.equal(res.status, 400)
   assert.equal(res.json.code, 'error.provider.env')
+
+  // /provider/probe backs the "add gateway" editor (it pulls /v1/models). It must
+  // exist and reach the network layer: a missing route answers 404 with
+  // "未知接口", which is the exact regression this guards.
+  res = await call(host, '/provider/probe', { method: 'POST', body: { baseURL: 'http://127.0.0.1:1/v1', apiKey: 'x' } })
+  assert.equal(res.status, 502)
+  assert.equal(res.json.code, 'error.provider.probe')
 
   for (const route of ['/provider/delete', '/provider/rename', '/provider/remove']) {
     res = await call(host, route, { method: 'POST', body: { providerId: 'workbudy' } })

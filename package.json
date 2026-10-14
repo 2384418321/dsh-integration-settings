@@ -1,6 +1,6 @@
 {
   "name": "dsh-integration-settings",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "type": "module",
   "description": "集成插件：在 DSH 设置中加入「MCP 管理 / Skill 管理 / 全局人设 / 思考解锁」四个可视化页面——思考解锁会自动识别各网关真正支持的思考档位并一键写回配置",
   "license": "MIT",
