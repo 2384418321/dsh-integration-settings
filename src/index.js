@@ -23,6 +23,11 @@ import {
   saveProvider,
   probeGateway,
   unlockProviderThinking,
+  readSchedule,
+  writeSchedule,
+  runScheduledUnlock,
+  normalizeSchedule,
+  normalizeIntervalMinutes,
   httpError,
 } from './core.js'
 
@@ -286,6 +291,8 @@ async function handle(ctx, req, res) {
     }
     case 'GET /provider/list':
       return json(res, 200, { ok: true, data: await readProviderState(process.env) })
+    case 'GET /provider/schedule':
+      return json(res, 200, { ok: true, data: await readSchedule(process.env) })
     // Read-only list, the unlock pass, and gateway add/edit. There is deliberately
     // no delete and no rename: a mis-click can never drop a gateway.
     case 'POST /provider/probe':
@@ -296,6 +303,38 @@ async function handle(ctx, req, res) {
       })
     case 'POST /provider/save':
       return json(res, 200, { ok: true, data: await saveProvider(process.env, body || {}) })
+    case 'POST /provider/schedule': {
+      // Only the three knobs are writable; the run bookkeeping (`lastRunAt`,
+      // `lastResult`, `nextRunAt`) stays host-owned so a stale page cannot rewind
+      // the clock or erase the last outcome.
+      const current = await readSchedule(process.env)
+      const patch = body || {}
+      const now = Date.now()
+      const enabled = patch.enabled === undefined ? current.enabled : !!patch.enabled
+      const onlyWorkbuddy = patch.onlyWorkbuddy === undefined ? current.onlyWorkbuddy : !!patch.onlyWorkbuddy
+      const intervalMinutes = patch.intervalMinutes === undefined
+        ? current.intervalMinutes
+        : normalizeIntervalMinutes(patch.intervalMinutes)
+      // A changed cadence — or switching the schedule back on — restarts the
+      // clock from now; otherwise a 6h → 15min switch would sit out the old slot
+      // and look broken, and a re-enabled schedule would fire almost at once.
+      const restarted = (!current.enabled && enabled) || intervalMinutes !== current.intervalMinutes
+      const next = enabled
+        ? (restarted ? now + intervalMinutes * 60000 : current.nextRunAt)
+        : null
+      return json(res, 200, {
+        ok: true,
+        data: await writeSchedule(process.env, normalizeSchedule({
+          ...current, enabled, onlyWorkbuddy, intervalMinutes, nextRunAt: next,
+        }, now)),
+      })
+    }
+    case 'POST /provider/schedule/run': {
+      // The page's "立即执行一次": always sweeps, and always records the run so
+      // "上次执行" stays honest. The timer does not come through here.
+      const result = await runScheduledUnlock(process.env, { force: true })
+      return json(res, 200, { ok: true, data: result })
+    }
     case 'POST /provider/unlock': {
       const input = body || {}
       return json(res, 200, {
@@ -315,6 +354,11 @@ async function handle(ctx, req, res) {
 
 /* ------------------------------------------------------------------- apply */
 
+// How often the scheduler wakes up to look at the clock. It is a poll, not a
+// guarantee: a sweep only runs when its own slot has actually arrived, so a
+// sleeping laptop simply misses a slot instead of catching up in a burst.
+const SCHEDULER_TICK_MS = 60000
+
 export function apply(ctx) {
   // Lets core.js ask the host which profile we live in (desktopProfiles.current)
   // instead of guessing from $DSH_HOME/profiles.
@@ -326,6 +370,27 @@ export function apply(ctx) {
     queue = next.catch(() => {})
     return next
   }
+
+  // Only one sweep may ever touch cordis.patch.yml at a time, so the timer goes
+  // through the same queue as the page's own unlock button.
+  const sweep = () => serialize(() => runScheduledUnlock(process.env)).catch(() => {})
+
+  ctx.effect(
+    () => {
+      const timer = setInterval(() => {
+        // The first tick is a minute out, which also gives the app time to finish
+        // loading providers before anything asks the gateways.
+        sweep()
+      }, SCHEDULER_TICK_MS)
+      // Never keep the host process alive on the plugin's account.
+      if (typeof timer.unref === 'function') timer.unref()
+      // A sweep right after startup covers "DSH was closed across a slot", but
+      // only when a slot is genuinely due; never on a fresh schedule.
+      sweep()
+      return () => clearInterval(timer)
+    },
+    `${PLUGIN_NAME}: scheduled thinking unlock`,
+  )
 
   ctx.effect(
     () =>

@@ -725,6 +725,19 @@ function PersonaSection(props) {
 
 const LEVEL_ORDER = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
+// Cadence choices for the scheduler. Kept as a literal so the client bundle has
+// no dependency on the host half; the host clamps anything outside this range.
+const SCHEDULE_INTERVALS = [15, 30, 60, 120, 360, 720, 1440]
+
+// Timestamps arrive as epoch ms from the host's own clock; they are only ever
+// shown, never compared against the browser's clock.
+function formatTime(ms) {
+  const d = new Date(Number(ms) || 0)
+  if (!Number.isFinite(d.getTime()) || d.getTime() <= 0) return '—'
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
 /**
  * Label for one model's declared thinking levels. `reasoningEfforts: false` is
  * the documented "this model does not reason" declaration, so it is spelled out
@@ -770,6 +783,63 @@ const EMPTY_PROVIDER = { id: '', apiKeyEnv: '', apiKey: '', baseURL: '', reasoni
 function suggestEnvName(id) {
   const base = String(id || '').toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
   return base ? `${base}_API_KEY` : ''
+}
+
+/**
+ * The scheduler card. It shows the cadence the background timer is running on,
+ * lets the user change it, and offers the same sweep the timer performs — with
+ * the honest caveat that a sweep only happens while DSH is running.
+ */
+function ScheduleCard({ schedule, busy, loading, error, onChange, onRunNow }) {
+  if (loading && !schedule) return h('div', { className: 'dsi-hint' }, '正在读取定时更新状态…')
+  if (error) return h(Note, { kind: 'error' }, `定时更新状态读取失败：${error}`)
+  if (!schedule) return null
+  const enabled = !!schedule.enabled
+  const last = schedule.lastResult
+  return h('div', { className: 'dsi-card' },
+    h('div', { className: 'dsi-inline' },
+      h('strong', { style: { fontSize: 13 } }, '定时更新'),
+      h('span', { className: `dsi-badge ${enabled ? 'dsi-badge-on' : 'dsi-badge-off'}` },
+        enabled ? `每 ${schedule.intervalMinutes} 分钟` : '已关闭'),
+    ),
+    h('label', { className: 'dsi-check' },
+      h('input', {
+        type: 'checkbox', checked: enabled, disabled: busy,
+        onChange: (e) => onChange({ enabled: e.target.checked }),
+      }),
+      h('span', null, '自动获取最新思考档位并写回配置（无需打开本页面）')),
+    h('div', { className: 'dsi-grid2' },
+      h(Field, { label: '更新间隔', hint: '到点才执行；睡眠/合盖跨过的时段不会补跑。' },
+        h('select', {
+          className: 'dsi-select', value: String(schedule.intervalMinutes), disabled: busy,
+          onChange: (e) => onChange({ intervalMinutes: Number(e.target.value) }),
+        },
+          SCHEDULE_INTERVALS.map((minutes) => h('option', { key: minutes, value: String(minutes) },
+            minutes >= 60 && minutes % 60 === 0 ? `每 ${minutes / 60} 小时` : `每 ${minutes} 分钟`)),
+        ),
+      ),
+      h(Field, { label: '范围', hint: '与「全部解锁」使用同一判断。' },
+        h('label', { className: 'dsi-check', style: { paddingTop: 6 } },
+          h('input', {
+            type: 'checkbox', checked: !!schedule.onlyWorkbuddy, disabled: busy,
+            onChange: (e) => onChange({ onlyWorkbuddy: e.target.checked }),
+          }),
+          h('span', null, '只处理 WorkBuddy 网关')),
+      ),
+    ),
+    h('div', { className: 'dsi-hint' },
+      `下次 ${schedule.nextRunAt ? formatTime(schedule.nextRunAt) : '开启后一个周期'}`
+      + `　上次 ${schedule.lastRunAt ? formatTime(schedule.lastRunAt) : '从未执行'}`
+      + (last
+        ? `（${last.changed ? `更新 ${last.unlockedModels} 个模型` : '无改动'}${(last.failedProviders || []).length ? `，探测失败 ${last.failedProviders.join('、')}` : ''}）`
+        : '')
+      + (schedule.lastError ? `　上次错误：${schedule.lastError}` : '')),
+    h('div', { className: 'dsi-hint' },
+      '仅在 DeepSeek Harness 运行期间生效：退出后计时暂停，重启时若已到点会立即补一次，之后按新间隔继续。'),
+    h('div', { className: 'dsi-inline' },
+      h(Button, { variant: 'primary', disabled: busy, onClick: onRunNow }, busy ? '执行中…' : '立即执行一次'),
+    ),
+  )
 }
 
 function ProviderEditor({ draft, setDraft, saving, probing, isNew, onCancel, onSave, onProbe }) {
@@ -967,6 +1037,60 @@ function ProviderSection(props) {
     }
   }
 
+  // The scheduler's own state. It lives in the host, not in this component, so a
+  // page reload shows the same cadence the background timer is running on.
+  const [schedule, setSchedule] = useState(null)
+  const [scheduleBusy, setScheduleBusy] = useState(false)
+  const scheduleState = useAsync(
+    () => api(`/provider/schedule?session=${encodeURIComponent(sessionId || '')}`, { sessionId }),
+    [sessionId],
+  )
+  useEffect(() => { setSchedule(scheduleState.data || null) }, [scheduleState.data])
+
+  const saveSchedule = async (part) => {
+    if (!schedule) return
+    setScheduleBusy(true); setError(null); setMessage(null)
+    try {
+      const next = await api('/provider/schedule', {
+        method: 'POST',
+        sessionId,
+        body: { ...schedule, ...part },
+      })
+      setSchedule(next)
+      setMessage(part.enabled === false
+        ? '已关闭定时更新；已经到点的那一次不会再写配置。'
+        : `定时更新已保存：每 ${next.intervalMinutes} 分钟，仅在 DeepSeek Harness 运行期间生效。`)
+    } catch (err) {
+      setError(err.message || String(err))
+    } finally {
+      setScheduleBusy(false)
+    }
+  }
+
+  const runNow = async () => {
+    setScheduleBusy(true); setError(null); setMessage(null)
+    try {
+      const result = await api('/provider/schedule/run', { method: 'POST', sessionId, body: {} })
+      const rows = (result.report && result.report.providers) || []
+      const failed = rows.filter((r) => r.status === 'error')
+      const parts = []
+      if (!result.ran) parts.push('还没到点，未执行。')
+      else if (!result.report) parts.push(`未能完成解锁：${result.error || '未知原因'}`)
+      else if (result.report.unlockedModels) parts.push(`已更新 ${result.report.unlockedModels} 个模型的思考档位`)
+      else parts.push('各网关的思考档位都已是最新，没有改动文件')
+      if (failed.length) parts.push(`探测失败：${failed.map((r) => `${r.id}（${r.error}）`).join('；')}`)
+      if (result.report && result.report.changed) parts.push('写配置前已自动备份，重启 DeepSeek Harness 后生效。')
+      setMessage(parts.join('　'))
+      scheduleState.reload()
+      state.reload()
+      await detect()
+    } catch (err) {
+      setError(err.message || String(err))
+    } finally {
+      setScheduleBusy(false)
+    }
+  }
+
   const scanned = (scan.data && scan.data.providers) || []
   const scanFor = (id) => scanned.find((r) => r.id === id) || null
   const detailFor = (providerId, modelId) => {
@@ -1025,6 +1149,10 @@ function ProviderSection(props) {
     h(Styles),
     h(Note, { kind: 'error' }, error),
     h(Note, { kind: 'ok' }, message),
+    h(ScheduleCard, {
+      schedule, busy: scheduleBusy || busy, loading: scheduleState.loading, error: scheduleState.error,
+      onChange: saveSchedule, onRunNow: runNow,
+    }),
     scan.loading ? h('div', { className: 'dsi-hint' }, '正在识别网关支持的思考档位…') : null,
     scan.error ? h(Note, { kind: 'error' }, `自动识别失败：${scan.error}`) : null,
     scan.data && !scan.data.unlockedModels && providers.length

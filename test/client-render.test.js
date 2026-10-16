@@ -118,6 +118,9 @@ test('every section renders markup against the shell React seed', async () => {
   assert.match(persona, /人设|persona/i)
   assert.match(providers, /思考解锁/)
   assert.match(providers, /全部解锁/)
+  // The scheduler card paints before its first fetch resolves, so the section
+  // must not blank out while /provider/schedule is in flight.
+  assert.match(providers, /定时更新/)
   // add/edit is available again, but the delete path stays gone for good
   assert.match(providers, /新增网关/)
   assert.doesNotMatch(providers, /删除|移除网关/)

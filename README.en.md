@@ -8,15 +8,15 @@
 
 Adds four visual pages to the DeepSeek Harness (DSH) **Settings**. The headline one is **one-click
 thinking unlock**: it detects which thinking levels each OpenAI-compatible gateway really supports and
-writes them into the model picker. The other three turn things you would otherwise hand-edit in files
-into point-and-click operations:
+writes them into the model picker — on demand or on a schedule. The other three turn things you would
+otherwise hand-edit in files into point-and-click operations:
 
 | Settings page | What it manages | Where it writes |
 | --- | --- | --- |
 | **MCP servers** | add / remove / edit / enable–disable MCP servers | the current profile's `cordis.patch.yml` (managed block) + `.dsh-integration/mcp.json` (source of truth) |
 | **Skills** | browse / create / edit / delete skills | DSH global, shared `.agents`, Claude / Codex global directories, plus the current project's `.dsh` / `.agents` / `.claude` directories |
 | **Global persona** | visually edit the persona file (the equivalent of Claude Code's `CLAUDE.md`) | `$DSH_HOME/AGENTS.md` (global) and `<project>/AGENTS.md` (current project) |
-| **Thinking unlock** | detects each gateway's real thinking levels on page open and unlocks them in one click; can also add/edit gateways (no delete) | the current profile's `cordis.patch.yml` (the `llm-pi-ai` entry's `config.providers`) + `$DSH_HOME/.credentials.yaml` (`refs`, secrets only) |
+| **Thinking unlock** | detects each gateway's real thinking levels on page open and unlocks them in one click; can also refresh them on a schedule (every 6 h by default, only while DSH runs); can add/edit gateways (no delete) | the current profile's `cordis.patch.yml` (the `llm-pi-ai` entry's `config.providers`) + `$DSH_HOME/.credentials.yaml` (`refs`, secrets only) |
 
 > This is a community plugin, not an official DeepSeek product. Evaluate it yourself before
 > installing, and consider backing up your profile directory first.
@@ -198,12 +198,41 @@ by those few dozen lines of YAML. This page does exactly one thing: **auto-detec
   would give the level dict a non-string key.
 - Unlocking writes a `.bak-<timestamp>` backup (3 kept) and the file is written `0600`.
 
+**Scheduled updates**
+
+You do not have to open this page and press "Unlock all": while DSH runs, the plugin does the same job
+on a cadence.
+
+- **Every 6 hours by default**, changeable on the page (15 min / 30 min / 1 / 2 / 6 / 12 / 24 h) or
+  switched off entirely. Changing the cadence — or switching a disabled schedule back on — restarts the
+  clock from now.
+- **It runs when the slot arrives, and never catches up in a burst.** The clock lives in
+  `<profile>/.dsh-integration/unlock-schedule.json`. Time skipped by sleep, lid-close or quitting DSH is
+  not replayed slot by slot — the next start notices the slot has passed, sweeps once, and continues on
+  the cadence. Only the switch, cadence and scope are writable from the page; "last run", "next run" and
+  the last outcome are host-owned and any stale value posted back is ignored.
+- **Same unlock path as the button**: it calls the very same `unlockProviderThinking` (same identity
+  check, same `onlyWorkbuddy` scope, same byte-range rewrite and pre-write backup) and goes through the
+  same serial queue, so the timer and the button can never write the file at the same time. The scope
+  switch defaults to WorkBuddy gateways only.
+- **Only while DSH runs**: no resident daemon, no OS-level schedule — no cron, no launchd, no autostart.
+  Quitting DSH stops it.
+- **Failures do not break the cadence**: an unreachable gateway is recorded in `lastError` and
+  `lastResult.failedProviders`, the others still unlock, and the next slot retries. When nothing is out
+  of date, not a single byte is written.
+- **"Run once now"** does not wait for the slot. It reuses the same route, still writes and still records
+  the run, but never flips a disabled switch back on.
+- The page shows the next/last run time and the last outcome (models updated / no change / failing
+  gateways).
+- A restart is still required for the written levels to reach the model picker.
+
 **What this page does not do**
 
-- **It never adds, edits or deletes a provider, and never writes a secret.** The host exposes only two
-  routes: `GET /provider/list` (read-only state) and `POST /provider/unlock` (the unlock write). The
-  page's only buttons are "Unlock all" and "Re-detect". To add a gateway, edit `cordis.patch.yml`.
-- When nothing is out of date, the page performs no write at all.
+- **It never adds, edits or deletes a provider, and never writes a secret.** Provider add/edit lives in
+  "Add / edit a gateway" below. This page's routes are `GET /provider/list` (read-only state),
+  `POST /provider/unlock` (the unlock write) and `GET|POST /provider/schedule` plus
+  `POST /provider/schedule/run` (read/write the cadence, run once now).
+- When nothing is out of date, no write happens at all.
 
 Restart DSH for the new levels to reach the model picker; before restarting you can check each model
 with `de_models`.

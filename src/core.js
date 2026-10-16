@@ -119,6 +119,7 @@ export function paths(env = process.env, ctx = hostContext) {
     patchFile: path.join(profileDir, 'cordis.patch.yml'),
     stateDir: path.join(profileDir, '.dsh-integration'),
     mcpFile: path.join(profileDir, '.dsh-integration', 'mcp.json'),
+    scheduleFile: path.join(profileDir, '.dsh-integration', 'unlock-schedule.json'),
     personaFile: path.join(home, 'AGENTS.md'),
     credentialsFile: path.join(home, '.credentials.yaml'),
   }
@@ -1351,4 +1352,137 @@ export async function unlockProviderThinking(env = process.env, { providerIds, d
     unlockedProviders: results.filter((r) => (r.unlocked || 0) > 0).map((r) => r.id),
     unlockedModels: results.reduce((total, r) => total + (r.unlocked || 0), 0),
   }
+}
+
+/* ------------------------------------------------- scheduled thinking unlock */
+
+/**
+ * The scheduler's own state, kept next to the MCP state in the profile's
+ * `.dsh-integration/` directory. It is bookkeeping, not configuration: it holds
+ * no credential and no gateway definition, only when the last sweep ran and
+ * what it found. Deleting the file resets the cadence, nothing else.
+ */
+export const DEFAULT_SCHEDULE_INTERVAL = 360
+export const MIN_SCHEDULE_INTERVAL = 15
+export const MAX_SCHEDULE_INTERVAL = 24 * 60
+
+export function normalizeIntervalMinutes(value, fallback = DEFAULT_SCHEDULE_INTERVAL) {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return fallback
+  const rounded = Math.round(n)
+  if (rounded < MIN_SCHEDULE_INTERVAL || rounded > MAX_SCHEDULE_INTERVAL) return fallback
+  return rounded
+}
+
+/**
+ * Coerces a persisted flag. Only a real boolean turns the schedule off; the
+ * strings "false"/"no" stay truthy on purpose, because the state file is written
+ * by this plugin alone and a typo there must not silently disable updates.
+ */
+function flag(value, fallback) {
+  if (value === undefined || value === null) return fallback
+  return !!value
+}
+
+/**
+ * The scheduler state as a whole. Pure: it never touches the disk, so the due
+ * computation and the interval clamp can be tested without a profile.
+ *
+ * `nextRunAt` is stored rather than derived, so a machine that was asleep
+ * across a slot does not fire six sweeps in a row when it wakes.
+ */
+export function normalizeSchedule(raw = {}, now = Date.now()) {
+  const source = raw && typeof raw === 'object' ? raw : {}
+  const intervalMinutes = normalizeIntervalMinutes(source.intervalMinutes)
+  const enabled = flag(source.enabled, true)
+  const onlyWorkbuddy = flag(source.onlyWorkbuddy, true)
+  const lastRunAt = positiveNumber(source.lastRunAt)
+  const lastResult = source.lastResult && typeof source.lastResult === 'object' ? source.lastResult : null
+  const lastError = typeof source.lastError === 'string' ? source.lastError : ''
+  let nextRunAt = positiveNumber(source.nextRunAt)
+  // A freshly enabled schedule waits one full interval instead of firing while
+  // the app is still starting; "run now" stays an explicit action.
+  if (enabled && nextRunAt === null) nextRunAt = (lastRunAt === null ? now : lastRunAt) + intervalMinutes * 60000
+  if (!enabled) nextRunAt = null
+  return {
+    enabled,
+    intervalMinutes,
+    onlyWorkbuddy,
+    lastRunAt,
+    nextRunAt,
+    lastResult,
+    lastError,
+    updatedAt: positiveNumber(source.updatedAt),
+  }
+}
+
+function positiveNumber(value) {
+  const n = Number(value)
+  return Number.isFinite(n) && n > 0 ? n : null
+}
+
+export function scheduleDue(schedule, now = Date.now()) {
+  if (!schedule || !schedule.enabled) return false
+  if (!schedule.nextRunAt) return false
+  return now >= schedule.nextRunAt
+}
+
+export async function readSchedule(env = process.env) {
+  const p = paths(env)
+  const raw = await readTextFile(p.scheduleFile, '')
+  if (!raw.trim()) return normalizeSchedule({}, Date.now())
+  try {
+    return normalizeSchedule(JSON.parse(raw), Date.now())
+  } catch {
+    // A hand-mangled state file must not stop the sweep; it only costs one slot.
+    return normalizeSchedule({}, Date.now())
+  }
+}
+
+export async function writeSchedule(env, schedule) {
+  const p = paths(env)
+  await writeFileAtomic(p.scheduleFile, `${JSON.stringify(normalizeSchedule(schedule), null, 2)}\n`, 0o600)
+  return normalizeSchedule(schedule)
+}
+
+/**
+ * One scheduled sweep: exactly the unlock pass the page's "全部解锁" performs,
+ * minus the page. It reads the schedule, skips when nothing is due, and records
+ * what happened so the page can report the last sweep without asking the
+ * gateways again.
+ *
+ * Every write still goes through `unlockProviderThinking`, so a sweep backs the
+ * patch up before touching it and leaves the rest of the file byte-identical.
+ */
+export async function runScheduledUnlock(env = process.env, { now = Date.now(), fetchImpl, force = false } = {}) {
+  const schedule = await readSchedule(env)
+  if (!force && !scheduleDue(schedule, now)) {
+    return { ran: false, reason: schedule.enabled ? 'not-due' : 'disabled', schedule }
+  }
+  let report = null
+  let lastError = ''
+  try {
+    report = await unlockProviderThinking(env, { onlyWorkbuddy: schedule.onlyWorkbuddy, fetchImpl })
+  } catch (err) {
+    // One unreachable gateway must not disable the schedule: record it and keep
+    // the cadence, the next slot tries again.
+    lastError = err?.message || String(err)
+  }
+  const next = normalizeSchedule({
+    ...schedule,
+    lastRunAt: now,
+    nextRunAt: now + schedule.intervalMinutes * 60000,
+    lastError,
+    lastResult: report
+      ? {
+        changed: !!report.changed,
+        unlockedModels: report.unlockedModels || 0,
+        unlockedProviders: report.unlockedProviders || [],
+        failedProviders: (report.providers || []).filter((r) => r.status === 'error').map((r) => r.id),
+      }
+      : null,
+    updatedAt: now,
+  }, now)
+  await writeSchedule(env, next)
+  return { ran: true, report, error: lastError || null, schedule: next }
 }
