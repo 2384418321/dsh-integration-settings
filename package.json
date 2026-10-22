@@ -1,4 +1,4 @@
-{
+﻿{
   "name": "dsh-integration-settings",
   "version": "0.2.10-dsh.4",
   "type": "module",
@@ -39,11 +39,6 @@
   ],
   "engines": {
     "node": "^22.19.0 || >=24"
-  },
-  "scripts": {
-    "build": "node scripts/build.mjs",
-    "test": "node --test test/*.test.js",
-    "prepack": "node scripts/build.mjs"
   },
   "devDependencies": {
     "esbuild": "^0.25.0",
