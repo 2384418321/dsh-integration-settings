@@ -1,0 +1,321 @@
+# dsh-integration-settings
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![DSH supported through 0.2.0-rc.2](https://img.shields.io/badge/DSH-up%20to%200.2.0--rc.2-2563eb.svg)](#环境要求)
+[![Node](https://img.shields.io/badge/node-%5E22.19%20%7C%7C%20%3E%3D24-339933.svg)](#环境要求)
+
+**简体中文** | [English](README.en.md)
+
+给 DeepSeek Harness（DSH）**设置**里补上两个可视化菜单：**MCP 管理** 与 **思考解锁**。后者把平时只能手改文件的事变成点选操作——自动识别每个 OpenAI 兼容网关真正支持的思考档位并写回模型选择器，也能设成定时自动更新。
+
+> **本仓库是本地分叉版**（版本号带 `-dsh.N` 后缀）。与上游的差别见 [LOCAL-PATCH.md](LOCAL-PATCH.md)：
+> 上游的 **Skill 管理** 与 **全局人设** 两个菜单已在本分叉移除（相关后端接口仍在，只是没有 UI 入口）；
+> **思考档位解锁** 与 **可用模型清单** 已彻底拆成两件事，分别由「思考解锁」开关和独立的「同步模型清单」按钮负责。
+
+| 设置菜单 | 管什么 | 背后落盘位置 |
+| --- | --- | --- |
+| **MCP 管理** | 增 / 删 / 改 / 启停 MCP 服务器；支持粘贴 `mcpServers` JSON 先预览再新增 | 当前 profile 的 `cordis.patch.yml`（受管区块）+ `.dsh-integration/mcp.json`（真理源） |
+| **思考解锁** | 打开即自动识别每个网关真正支持的思考档位，一键解锁写回配置；可新增/编辑网关（不提供删除） | 当前 profile 的 `cordis.patch.yml`（`llm-pi-ai` 条目的 `config.providers`）+ `$DSH_HOME/.credentials.yaml`（`refs`，只存密钥） |
+| **同步模型清单** | 独立按钮，与「思考解锁」开关语义分离：先预览「将新增 N 个 / 将移除 M 个」再确认；一次同步同时刷新思考强度等级与可用模型列表，两者同批生效；可与页面「定时更新」绑定同一调度（定时触发自动确认，并在 UI 提示上次差异摘要） | 同上（`config.providers` 的 `levels` 与 `models`）+ `$DSH_HOME/.dsh-integration/unlock-schedule.json`（定时状态与上次同步摘要） |
+
+> 这是社区插件，不是 DeepSeek 官方产品。安装前请自行评估，建议先备份 profile 目录。
+
+## 环境要求
+
+- **DSH 桌面版 0.2.0-rc.2**（本插件按该版本的 `settings.section` 槽位与 loader patch 机制开发；
+  宿主包名从此版本起为 `@deepseek-ai/*`）。
+- **Node.js `^22.19.0 || >=24`**：仅在本地构建 / 跑测试时需要；**直接安装不需要 Node**，
+  因为仓库里已提交构建产物 `lib/`。
+- 安装完成后**必须重启 DSH**：MCP 改动由 loader 在启动时读取（技能、人设改动即时生效）。
+
+## 安装
+
+两种方式任选其一；下面用 `desktop` profile 举例，**换成你自己的 profile 名**即可
+（DSH 桌面版的默认 profile 就是 `desktop`）。
+
+> **想直接把安装交给另一台电脑上的 AI？** 把仓库地址和
+> [INSTALL.zh-CN.md](INSTALL.zh-CN.md) 一起发给它即可——那是一份逐条带「期望输出」的可执行
+> runbook（环境探测 → 安装 → 重启 → 验证 → 网关配置 → 定时验收 → 故障排查 → 验收清单）。
+
+### 方式 A：从 GitHub 安装（推荐）
+
+```bash
+# dsh CLI 在 DSH 应用目录里：
+#   macOS        /Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh
+#   Windows 等   <DSH 安装目录>/resources/runtime/cli/bin/dsh（Windows 上是 dsh.cmd）
+# 若已把 dsh 加入 PATH，直接写 dsh 也行；布局不同时可在安装目录里搜 runtime/cli
+DSH="/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh"
+
+# 1) 安装：会登记依赖并把包名追加到 profile 的 dsh.profile.bundles
+"$DSH" plugin --profile desktop add github:2384418321/dsh-integration-settings
+
+# 2) 确认已登记（列表里出现 dsh-integration-settings 即成功）
+"$DSH" plugin --profile desktop list
+```
+
+仓库直接提交了 `lib/` 构建产物，所以**从 GitHub 安装既不需要 npm 发布，也不需要本地构建**。
+
+### 方式 B：从本地目录安装（改源码调试用）
+
+```bash
+git clone https://github.com/2384418321/dsh-integration-settings.git
+cd dsh-integration-settings
+DSH="/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh"
+"$DSH" plugin --profile desktop add "$(pwd)"    # 本地目录以 link: 形式登记
+```
+
+以 `link:` 登记时，本分叉没有 `src/` 与构建脚本：**直接改 `lib/index.js` / `lib/client.js`**，再重启 DSH 即可，不必重装。
+
+### 方式 C：绕开 dsh CLI 手工登记
+
+1. 在 profile 目录里安装（profile 目录：`$DSH_HOME/profiles/<profile 名>`）：
+
+   ```bash
+   cd "$HOME/.dsh/profiles/desktop"
+   pnpm add github:2384418321/dsh-integration-settings
+   ```
+
+2. 确认该目录 `package.json` 的 `dsh.profile.bundles` 数组里**有**
+   `"dsh-integration-settings"`（缺了就手工追加到数组末尾）。
+3. 重启 DSH。
+
+### 安装完成后怎么确认
+
+1. DSH 重启后，**设置**（Settings）左栏底部出现两项：`MCP 管理 / 思考解锁`。
+2. 打开「MCP 管理」，页面上方的 **profile 徽标**应显示你要操作的那个 profile 名；
+   多 profile 场景下先核对徽标，再动手改。
+3. 已有 MCP 服务器应被列出；`cordis.patch.yml` 里手写但未被纳管的行会以横幅提示，可一键导入。
+
+## 卸载
+
+```bash
+DSH="/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh"
+"$DSH" plugin --profile desktop remove dsh-integration-settings
+```
+
+再从 profile 的 `dsh.profile.bundles` 里删掉本包名，并（可选）清理 profile 的
+`cordis.patch.yml` 中 `# >>> dsh-integration-settings:managed:mcp` 到
+`# <<< dsh-integration-settings:managed:mcp` 之间的受管区块。
+
+## 故障排查
+
+| 现象 | 原因 / 处理 |
+| --- | --- |
+| **页面所有接口 404**（`定时更新状态读取失败：请求失败（HTTP 404）`），且插件状态是 `pending` | 宿主 `inject` 声明了**运行时不存在的服务**：cordis 等不到服务，fiber 永远停在 `pending`，`apply()` 不执行 ⇒ 路由根本没注册。0.2.6 及更早版本在 `webRuntime` 被新版 DSH 删除后即触发此问题 | 升级到 **0.2.7 及以上**（`inject` 已收成 `['webServer','sessions']`），然后**完全重启** DSH |
+| `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED` | pnpm 11 默认不执行 git 依赖的 `prepare` | 在 profile 的 `pnpm-workspace.yaml` 加 `allowBuilds:` + `  '<包名>': true`，再重跑安装 |
+| `sh: npm: command not found` / `spawnSync npx ENOENT` | 该 profile 里有依赖的 `prepare` 要跑 `npm install`，而这台机器没有 npm/npx | 装 Node.js（自带 npm/npx）后重试；细节见 [INSTALL.zh-CN.md](INSTALL.zh-CN.md) 第 7 节 |
+| 装完了，设置里没有这两个菜单 | ① 确认 `list` 与 profile `package.json` 的 `dsh.profile.bundles` 里有本包名；② 确认重启的是**同一个** profile；③ 若 bundle 加载失败，DSH 启动时会往 stderr 打 `<bin>: skipping profile bundle "dsh-integration-settings": <原因>` 并静默跳过——常见原因是 `lib/` 缺失（构建产物未随仓库提供）、Node 版本过低或依赖解析失败 |
+| 点进菜单一片空白 | `settings.section` 是 root scope 槽位，一旦在条目里调用 seat 上的 session hook（`usePanelInfo` 等）就会触发 `Minified React error #311`，shell 会把整个槽位替换成 `<div data-slot-error="settings.section"></div>`。改客户端代码时请守「root scope 条目不调用任何 seat hook」这条（见下方设计要点） |
+| MCP 改了不生效 | profile patch 由 loader **启动时**读取：重启 DSH 后生效（页面上也有提示）。技能、人设改动即时生效 |
+| 写操作报 403 / 415 | 宿主路由要求写请求带 `x-dsh-integration: 1` 与 `application/json`；非 loopback / 不可信 Host、`Origin` 与 `Host` 不一致、`Sec-Fetch-Site: cross-site` 一律 403 |
+| patch 写坏了想回滚 | 每次写入前都会在 profile 目录留时间戳备份（保留 3 份），改名覆盖回去即可；也可以只删掉两行标记之间的受管区块 |
+| 页面报 `ambiguous_profile` | 有多个 profile 的依赖里含本插件，无法唯一确定。用页面上的 profile 选择器指定，或设置 `DSH_PROFILE_DIR` / 传 `--profile <名>` |
+
+**数据与隐私**：插件不内置任何凭据。密钥请按下面的写法引用环境变量（`!!js process.env.X`），
+不要明文写进 patch；`.dsh-integration/` 是你的本机数据，已在 `.gitignore` 里排除。
+
+## 设计要点
+
+### MCP 管理
+DSH 没有「MCP 注册表」这种东西：**一个 MCP 服务器就是 profile patch 里的一条 loader 行**。
+
+```yaml
+- insert:
+    - id: mcp-github
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: github                              # 工具名 => mcp__github__<tool>
+        transport: stdio                                # stdio | streamable-http
+        command: npx
+        args: ['-y', '@modelcontextprotocol/server-github']
+        env: { GITHUB_TOKEN: !!js process.env.GITHUB_TOKEN }
+```
+
+- 因为「新增未知 id 的 patch 条目」只有 `- insert:` 一种合法写法，所以本插件把
+  **受管区块整体重写**：JSON（`.dsh-integration/mcp.json`）是真理源，区块每次由它重新生成。
+- 区块用两行标记注释包夹，`cordis.patch.yml` 里其它手写内容原样保留；写入前做 YAML 结构校验 +
+  时间戳备份（保留 3 份）。
+- 已经在 patch 里手写、但插件还不认识的 MCP 行会在页面上以横幅提示，可一键导入纳管。
+- `!!js` 表达式（例如 `!!js process.env.GITHUB_TOKEN`）在往返编辑中不会丢失，密钥不会落盘：
+  `env` / `headers` 的任意层级值、以及 `args` 中以 `!!js ` 开头的元素都会被写成真正的 YAML 标签
+  （`TOKEN: !!js process.env.GITHUB_TOKEN`），普通字符串则保持原样；读回时又是字符串，往返无损。
+- 若 profile 的 patch 文件是模板里的 `[]` 空占位，插件会在写入受管区块前先丢掉这行占位，
+  避免生成 `Unexpected seq-item-ind token` 这类非法 YAML。
+
+### 改的是哪个 profile？
+按以下顺序解析，尽量不猜（顺序：权威 → 显式 → 推断）：
+
+1. 宿主服务 `ctx.get('desktopProfiles').current.dir`（桌面版里就是当前真正在用的 profile，最权威）；
+2. 环境变量 `DSH_PROFILE_DIR`；
+3. `--profile <名>` / `--profile=<名>` 参数或 `DSH_PROFILE` 环境变量（该 profile 目录需存在）；
+4. 扫描 `$DSH_HOME/profiles/*`，找**唯一**一个依赖里含本插件的 profile；
+5. 有多个候选时优先 `desktop`；仍无法唯一确定则报 `ambiguous_profile` 并提示手动指定，不会瞎写。
+
+可在页面上方的 profile 徽标确认当前操作对象。
+
+### 设置页 seat 里的坑（改这个插件前必读）
+`settings.section` 是 **root scope** 槽位。shell 给每个条目的 props 里塞了一整套 seat 分享：
+`usePanelInfo`、`useSessions`、`useSessionStatus`、`useWorkspaces`、`useResource`、
+`useSessionRetainInfo`、`renderFactorySlot`、`t`、`close`。
+
+- **这些 `use*` 在 root scope 条目里调用会抛异常**（它们属于 session scope）。一旦把调用包在
+  `try/catch` 里把异常吞掉，React 的 hook 链就错位了，**下一次渲染**会在组件里第一个 `useState`
+  处抛 `Minified React error #311`；shell 有 per-entry 错误边界，会把整个 slot 换成
+  `<div data-slot-error="settings.section"></div>` —— 用户看到的就是「点进去空白」。
+  所以：**root scope 条目绝不调用 seat 上的任何 hook**，只用普通 prop（本插件的 `sessionIdOf`
+  只读 `props.sessionId`）。
+- 更不能让 hook 调用顺序依赖 props 形状（第二个渲染时 props 变了 → "more/fewer hooks than
+  during the previous render"，同样白屏）。
+- `test/client-hooks.test.js` 专门守这两条：用计数版 React 直接驱动组件函数，断言 seat 上的
+  session hook **一次都没被调用**、且两套不同 props 下 hook 序列完全一致。改组件时别绕过它。
+- 需要一次渲染看不出来的 bug 时，`renderToString` 抓不到 hook 顺序变化；上游会用
+  `DSI_DEBUG=1 node scripts/build.mjs` 出不压缩、保留函数名 + 内联 sourcemap 的客户端包，再用无头
+  Chrome 打开真实 GUI 看控制台栈。本分叉没有构建链，需要在 `lib/client.js` 里自行定位。
+
+### （上游的）Skill 管理 / 全局人设 — 本分叉已移除
+`lib/client.js` 的注册数组现在只保留 `integration-mcp` 与 `integration-providers`，所以这两个
+页面的 UI 入口已经不存在；后端接口 `/skill/*`、`/persona/*` 仍在（组件函数也还在 bundle 里），
+只是没有入口。上游版本用它们浏览/新建/编辑技能（目录下带 YAML frontmatter 的 `SKILL.md`）和可视化
+编辑 `$DSH_HOME/AGENTS.md` 人设文件；这些能力本分叉没保留 UI，需要时直接手改文件。
+
+### 思考解锁
+
+DSH 的模型供应商由 `@deepseek-ai/dsh-llm-pi-ai` 的 `config.providers` 决定，写在各 profile 的
+`cordis.patch.yml` 里。思考档位（`reasoningEfforts`）一旦声明就是**白名单**：没声明的档位在模型
+选择器里就是灰的，所以「这个模型能不能选 High / Max」完全由那几十行 YAML 决定。本页只做这一件事：
+**自动识别 + 一键解锁**。
+
+**自动识别（只读，不改文件）**
+
+- **打开页面即自动探测**：对每个被判定为网关的供应商发一次只读的 `GET /models`，读出
+  `reasoning_supported_efforts` / `can_disable_thinking`，逐模型与当前配置比对，页面显示
+  「待解锁 N / 已一致 M / 网关未声明 K / 网关已不提供 G」。识别阶段**不写任何文件**。
+- **按形态自动判断，不写死名字**：只处理同时满足「`api` 为空或 `openai-completions`」+
+  「`baseURL` 是 http(s) 地址」+「`apiKeyEnv` 的凭据在 `$DSH_HOME/.credentials.yaml` 的 `refs:` 里
+  或存在同名环境变量」的供应商。其余在页面上标出**跳过原因**（`api` 不是 OpenAI 兼容 / 地址不可解析 /
+  凭据缺失），既不探测也不改写。
+- **只碰这个条目的 `config.providers`**：`- id: llm-pi-ai` 以外的条目一律不读不写。DSH 自带的
+  `deepseek-official` / `deepseek-account` 不在这个文件里，插件碰不到。
+- **先认身份，再决定解锁谁**：默认只解锁真正的 WorkBuddy 网关。判据按顺序两条——先看
+  `<origin>/healthz` 返回的 JSON 里 `service` 是否含 `workbuddy`（本机两个网关分别回
+  `workbuddy-manager` 与 `workbuddy2api`，该接口不需要密钥）；认不出时再看 `/v1/models` 的模型 id
+  是否**全部**带 `cn:` / `global:` 命名空间。结果逐行标注在供应商名前：
+  `WorkBuddy · workbuddy2api（按 /healthz）` 或 `非 WorkBuddy 网关`。
+- **其它网关默认不动**：没被认成 WorkBuddy 的供应商列出原因后跳过，配置一字不改。确实要连它们一起
+  解锁时，取消勾选页面上的「只解锁 WorkBuddy 网关」即可。
+- **点「查看模型」**可展开某个供应商的**只读**模型清单，逐个看它当前声明了哪些档位、以及网关要求
+  改成什么（含会去掉哪几档）。
+
+**一键解锁**
+
+- 点「全部解锁」把档位写进 `cordis.patch.yml`，写前自动备份。**网关的能力表是唯一真相**——网关说
+  某模型只支持 `medium` 就只声明 `medium`，你配置里多出来的档位会被去掉；解锁前页面会把「会减少
+  档位」的模型连 `原档位 → 新档位` 一起列出来。
+- **网关没说的模型不动**：网关对某个模型完全没给思考信息时，插件保留你原来的声明，**绝不会**替你
+  写成 `reasoningEfforts: false`（那等于宣称该模型不支持思考）。网关已不提供的模型同样原样保留。
+- **一个网关探测失败不影响其它**：失败的那个单独报错，其余照常解锁。
+- **兼容手写分组**：写回时只替换目标供应商自己那一段字节，其它分组**逐字节原样保留**——手写的流式
+  列表（`input: [ "text", "image" ]`）、带引号的标量、`reasoningEfforts: false`（声明「不支持思考」
+  的模型）都不会被重排或丢掉；没有任何改动时文件零变化。
+- **`"off"` 必须带引号**：YAML 1.1 会把裸 `off:` 解析成布尔 `false`，档位字典的键类型就错了。
+  插件写出的 `off` 一定带引号。
+- 解锁写盘时留 `.bak-<时间戳>` 备份（保留最近 3 份），文件权限按 `0600` 写。
+
+**定时更新**
+
+不用每次打开本页点「全部解锁」：DSH 运行期间，插件自己按周期做同一件事。
+
+- **默认每 6 小时跑一次**，页面上可改成 15 分钟 / 30 分钟 / 1 / 2 / 6 / 12 / 24 小时，也可以直接关掉。
+  改周期、或把已关掉的开关重新打开，都会**从现在重新计时**。
+- **到点才跑，不补跑**：计时状态存在 `<profile>/.dsh-integration/unlock-schedule.json`。
+  睡眠、合盖或退出 DSH 跨过的时间段**不会补跑**——只在下次启动时发现「已过点」才立刻补一次，
+  之后按新间隔继续，不会连着一串写盘。页面上只能改开关 / 周期 / 范围三项，「上次执行」「下次执行」
+  由插件自己维护，页面回传的旧值会被忽略。
+- **走的是同一个解锁逻辑**：和「全部解锁」共用 `unlockProviderThinking`（同样的身份判断、同样的
+  `onlyWorkbuddy` 开关、同样的字节区间改写与写前备份），也排在同一条串行队列里，所以定时任务和
+  手点按钮**不可能同时改文件**。范围开关默认也是「只处理 WorkBuddy 网关」。
+- **只在 DSH 运行期间生效**：没有常驻后台进程、不装系统级定时任务（cron / launchd / 开机自启都没有）。
+  退出 DSH 即停。
+- **失败不中断**：某个网关探测失败只记在 `lastError` 与 `lastResult.failedProviders` 里，其余网关照常
+  处理；下一次到点再试。配置没有实际变化时**一个字节都不写**。
+- **「立即执行一次」**不必等到点：它复用同一条路由，会照常写盘和记「上次执行」，但**不会**把已关掉的
+  开关重新打开。
+- 页面显示「下次 / 上次」时间与上次结果（更新了几个模型 / 无改动 / 探测失败的网关）。
+- 需要重启确认：定时写回同样要**重启 DSH** 才会在模型选择器里生效。
+
+**本页不做什么**
+
+- **不新增、不编辑、不删除供应商，也不写密钥**：供应商的新增/编辑走下面的「新增 / 编辑网关」，
+  本页的路由只有 `GET /provider/list`（只读状态）、`POST /provider/unlock`（解锁写入）与
+  `GET|POST /provider/schedule`、`POST /provider/schedule/run`（定时更新的读写与立即执行）。
+- 没有待解锁项时不会有任何写入动作。
+
+解锁后需**重启 DSH** 才会在模型选择器里看到新档位；重启前可用 `de_models` 核对每个模型是否带上了
+「思考等级」。
+
+### 新增 / 编辑网关
+
+顶部「新增网关」按钮：填 `id` / `baseURL` / `apiKeyEnv` / 密钥 → 「测试连接并拉取模型」→ 勾选要暴露的
+模型 → 保存。写前自动备份；密钥写进 `$DSH_HOME/.credentials.yaml` 的 `refs:`，不进 `cordis.patch.yml`。
+
+已有网关可以「编辑」（改地址、换密钥、增删模型），但 **`id` 建好后不可改**，页面也**不提供删除**：
+误点不会让某个网关从配置里消失。真要删除时手工编辑 `cordis.patch.yml`，或用写前备份恢复。
+
+## 安全边界
+
+宿主端只注册一个 loopback HTTP 路由 `/api/dsh-integration`：
+
+- **Host 校验**：只接受 loopback 或 `webApp` / `webServer` 公布地址对应的 host（旧版 DSH 回退到
+  `webRuntime.trustedHosts`）；`Origin` 与 `Host`
+  不一致直接 403；`Sec-Fetch-Site: cross-site` 直接 403（防止网页跨站打本地接口）。
+- **写操作凭证**：所有非 GET 请求必须带 `x-dsh-integration: 1` 与 `application/json`，否则 403/415。
+- **路径栅栏**：技能目录只允许单层 kebab-case 目录名；备份文件名做白名单匹配；不跟随符号链接逃逸。
+- **串行化**：所有写操作经同一条 Promise 队列，避免并发写坏 patch。
+- 不写凭据：`env`/`headers` 里若填密钥明文，那是用户自己的选择；推荐按 README 用 `!!js process.env.X`。
+
+## 开发
+
+> 上游把源码放在 `src/`，用 esbuild 构建到 `lib/`，并带一套 `test/` 测试；**本分叉只保留构建产物**，
+> 没有 `src/` / `scripts/` / `test/`。改代码 = 直接改 `lib/`。下面仍保留上游的测试清单供参考。
+
+```bash
+# 本分叉的"构建"就是编辑这三样：
+#   lib/index.js    服务端 ESM（路由、patch 读写、providers/思考解锁逻辑）
+#   lib/client.js   React 客户端 bundle（压缩；中文是 \uXXXX 转义，grep 前先解码）
+node --check lib/index.js       # 语法校验（package.json type=module，按 ESM 解析）
+node --check lib/client.js
+```
+
+- `test/core.test.js`：patch 区块生成/替换/幂等、`!!js` 标签往返、`[]` 空占位、服务器校验、
+  技能 CRUD（含 `../` 逃逸拒绝）、人设备份轮转与读取。
+- `test/host.test.js`：**对着构建产物**起真 HTTP 服务，覆盖 11 条路由 + 404 分支 + 三道安全栅栏。
+- `test/client.test.js`：按 `window.__ModuleLoader__.load` 的真实加载方式加载客户端包，
+  断言 `settings.section` 注册（含无 locale 服务、locale 抛异常两种降级路径）。
+- `test/client-render.test.js`：用真 React + `react-dom/server` 按 shell 的 `as()` 语义复刻
+  React 种子，断言页面都能渲染出非空 DOM。
+- `test/client-hooks.test.js`：hook 顺序与 seat hook 的白盒回归（见上一节）。
+- `test/providers.test.js`：网关判定（`judgeProvider`）与 `/models` 探测、`unlockPlan` 纯函数、
+  解锁写入与备份、`dryRun` 不落盘、跳过非网关与凭据缺失、`"off"` 引号与 `false` 声明往返。
+
+调试小工具：浏览器控制台里 `localStorage.dsiDebug = '1'` 后重载，会**打印一次** seat 分享的
+props 键名（默认静默，不影响用户控制台）。
+
+参考实现：`@michengai/dsh-skills-manager`（`settings.section` 槽位 + esbuild banner/footer 打包方式）。
+槽位契约见 `@deepseek-ai/dsh-client-ui-settings` 的 `slots.d.ts`：
+`settings.section` = `{ kind: 'list', scope: 'root', owner: { close } }`，注册方自带
+`id` / `order` / `label`。
+
+## 已知限制
+
+- **只覆盖全局作用域**：`settings.section` 是 root scope 槽位，拿不到会话上下文（见上面
+  「设置页 seat 里的坑」），所以技能页只列出全局技能目录、人设页只编辑 `$DSH_HOME/AGENTS.md`，
+  项目级技能目录/项目级 `AGENTS.md` 需要在会话内的界面上才能出现。页面标题里已注明这一点。
+  宿主端 `/state?session=<id>` 与 `x-dsh-integration-session` 头已经预留，将来若有会话内的槽位可直接复用。
+- profile patch 的改动由 loader 在**启动时**读取；本机 desktop profile 没有 HMR bundle，
+  所以 MCP 改动**需要重启 DSH** 才生效（页面内已提示）。技能与人设改动即时生效。
+- MCP 页暂不支持编辑 `reconnect` 子对象与 MCP prompt templates（前者保留原值、后者 DSH 不支持）。
+- 未注册 icon：`settings.section` 的 owner props 只约定 `id`/`order`/`label`，图标由 shell 兜底。
+
+## 许可证
+
+[MIT](LICENSE) © 2026 2384418321
