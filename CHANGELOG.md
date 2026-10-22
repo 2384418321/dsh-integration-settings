@@ -3,6 +3,21 @@
 本文件的格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.10-dsh.4] - 2026-10-21
+
+**只改文档与分发，`lib/` 代码与 0.2.10-dsh.3 完全一致**（功能无变化；升级到本版等价于 dsh.3）。
+
+### 文档（真值修复）
+- `README.md` / `README.en.md` / `INSTALL.zh-CN.md` 与仓库实际状态对齐：本分叉只有 **MCP 管理** 与 **思考解锁** 两个设置页
+  （上游的 Skill 管理 / 全局人设已移除，后端接口仍在，只是没有 UI 入口）。
+- 补上 **同步模型清单** 的说明：独立按钮、先预览「将新增 N / 将移除 M」再确认、一次同步同时刷新思考档位与可用模型清单、
+  与页面「定时更新」共用同一调度；落盘位置写明 `config.providers` 的 `levels`/`models` 与 `unlock-schedule.json`。
+- 删掉指向不存在的 `scripts/install.sh`、`scripts/build.mjs`、`test/` 的安装与开发指引，改为「本分叉直接编辑 `lib/`」。
+
+### 分发
+- 公开源码仓库：<https://github.com/2384418321/dsh-integration-settings>（MIT；`lib/` 构建产物随仓库提交，可直接
+  `dsh plugin add github:2384418321/dsh-integration-settings`）。
+
 ## [0.2.10-dsh.3] - 2026-10-21
 
 补完两件事：MCP 管理页支持**粘贴 mcpServers JSON 新增**（先预览再写入），以及界面上的**路径/凭据脱敏**（为对外分享与入插件市场做准备）。

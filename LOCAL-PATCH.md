@@ -105,3 +105,13 @@
 
 把依赖改回上游 `github:` spec 并 `pnpm install`（需上游仓库存在；当前已不存在，故此法暂不可用）。
 替代方式：把 `lib/client.js` 里那两条注册数组项加回去（bundle 内组件 `We`/`Ge` 仍在）。
+
+## 附：文档与分发（0.2.10-dsh.4）
+
+本版**没有改 `lib/` 任何一行**，只做两件事：
+
+1. **文档真值修复**：`README.md` / `README.en.md` / `INSTALL.zh-CN.md` 原先描述的是上游仓库
+   （四个设置页、`src/` + esbuild 构建链、`test/` 测试集、`scripts/install.sh` 一键脚本），与本分叉实际状态不符。
+   现已改为：两个设置页、直接编辑 `lib/`、无构建链与测试集，并补上「同步模型清单」按钮的说明。
+2. **公开仓库**：<https://github.com/2384418321/dsh-integration-settings>（MIT），供
+   `dsh plugin add github:2384418321/dsh-integration-settings` 安装，也作为插件市场收录的源码地址。
