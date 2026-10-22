@@ -1,9 +1,9 @@
-# Changelog
+﻿# Changelog
 
 本文件的格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [0.2.10-dsh.4] - 2026-10-21
+## [0.2.10-dsh.4] - 2026-10-22
 
 **只改文档与分发，`lib/` 代码与 0.2.10-dsh.3 完全一致**（功能无变化；升级到本版等价于 dsh.3）。
 
