@@ -162,7 +162,15 @@ patch.**
 DSH providers live in `@deepseek-ai/dsh-llm-pi-ai`'s `config.providers`, written into each profile's
 `cordis.patch.yml`. A declared `reasoningEfforts` dict is a **whitelist**: levels you do not declare
 show up greyed out in the model picker, so "can I pick High / Max on this model?" is decided entirely
-by those few dozen lines of YAML. This page does exactly one thing: **auto-detect + one-click unlock**.
+by those few dozen lines of YAML.
+
+This page has **two entry points that are deliberately not bound together** — the one semantic fix this
+fork makes over upstream:
+
+| Entry point | Owns only | Fields written |
+| --- | --- | --- |
+| "Unlock thinking" switch / "Unlock all" | thinking levels (`reasoningEfforts` / `levels`) | `config.providers[*].levels` |
+| "Sync model list" button | the available model list (`models`), refreshing levels with it | `config.providers[*].models` + `levels` |
 
 **Auto-detect (read-only, writes nothing)**
 
@@ -205,10 +213,38 @@ by those few dozen lines of YAML. This page does exactly one thing: **auto-detec
   would give the level dict a non-string key.
 - Unlocking writes a `.bak-<timestamp>` backup (3 kept) and the file is written `0600`.
 
+**Sync model list (its own button, preview before write)**
+
+"Unlock all" only touches levels; whether the model list still matches what the gateway serves is a
+different question. "Sync model list" answers exactly that, and refreshing the levels is a side effect
+of the same write — the two are separate so that unlocking levels can never quietly blank the model list.
+
+- **Preview first**: the button calls `POST /providers/models/sync-preview` (read-only) and returns
+  "will add N / will remove M / keep K", broken down per provider into `levels` and `models`
+  (`added` / `removed` / `kept`). The preview **writes nothing**.
+- **Then confirm**: `POST /providers/models/sync-apply` requires the preview digest per provider (plus
+  `confirm: true`). If the list moved between preview and apply (the gateway changed, someone edited the
+  patch), the server answers `409 error.provider.sync.stale` and asks you to preview again — it never
+  writes blind.
+- **One write, two things**: confirming refreshes the thinking levels *and* the available model list in
+  the same pass, so you can never end up with new levels next to a stale model list.
+- **Probe failures error out, they never blank the list**: an unreachable gateway or a failing `/models`
+  is reported per provider, an empty result from the gateway is refused with `502
+  error.provider.sync.empty`, and when every gateway fails the whole call returns `502` without writing
+  a single byte. **The model list is never emptied.**
+- **Atomic write plus backup**: the patch is rewritten through `writeFileAtomic` (`writeWithBackup`,
+  3 `.bak-<timestamp>` kept), validated as YAML before writing and re-parsed afterwards.
+- **Same schedule as "scheduled updates"**: the scheduler runs this very path (`source: "schedule"`,
+  auto-confirmed) and records the diff summary in `unlock-schedule.json`'s `lastResult.sync` (models
+  added/removed, the ids involved, level changes, failing gateways); the page shows a line such as
+  "last sync: +3 / -1".
+
 **Scheduled updates**
 
-You do not have to open this page and press "Unlock all": while DSH runs, the plugin does the same job
-on a cadence.
+You do not have to open this page and press "Unlock all" or "Sync model list": while DSH runs, the plugin
+does **both** jobs on a cadence — unlock the thinking levels and sync the available model list (the
+scheduled path auto-confirms without a dialog, but it logs the run and surfaces the last diff summary on
+the page).
 
 - **Every 6 hours by default**, changeable on the page (15 min / 30 min / 1 / 2 / 6 / 12 / 24 h) or
   switched off entirely. Changing the cadence — or switching a disabled schedule back on — restarts the
@@ -237,9 +273,11 @@ on a cadence.
 
 - **It never adds, edits or deletes a provider, and never writes a secret.** Provider add/edit lives in
   "Add / edit a gateway" below. This page's routes are `GET /provider/list` (read-only state),
-  `POST /provider/unlock` (the unlock write) and `GET|POST /provider/schedule` plus
-  `POST /provider/schedule/run` (read/write the cadence, run once now).
-- When nothing is out of date, no write happens at all.
+  `POST /provider/unlock` (the unlock write), `GET|POST /provider/schedule` plus
+  `POST /provider/schedule/run` (read/write the cadence, run once now), and
+  `POST /providers/models/sync-preview` / `POST /providers/models/sync-apply` (preview and write the
+  model list).
+- When nothing is out of date and the list has no diff, no write happens at all.
 
 Restart DSH for the new levels to reach the model picker; before restarting you can check each model
 with `de_models`.

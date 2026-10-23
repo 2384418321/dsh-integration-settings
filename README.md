@@ -182,8 +182,15 @@ DSH 没有「MCP 注册表」这种东西：**一个 MCP 服务器就是 profile
 
 DSH 的模型供应商由 `@deepseek-ai/dsh-llm-pi-ai` 的 `config.providers` 决定，写在各 profile 的
 `cordis.patch.yml` 里。思考档位（`reasoningEfforts`）一旦声明就是**白名单**：没声明的档位在模型
-选择器里就是灰的，所以「这个模型能不能选 High / Max」完全由那几十行 YAML 决定。本页只做这一件事：
-**自动识别 + 一键解锁**。
+选择器里就是灰的，所以「这个模型能不能选 High / Max」完全由那几十行 YAML 决定。
+
+本页有**两个互不绑定的入口**，这是本分叉相对上游最重要的语义修正：
+
+| 入口 | 只负责 | 落盘字段 |
+| --- | --- | --- |
+| 「思考解锁」开关 / 「全部解锁」按钮 | 思考强度等级（`reasoningEfforts` / `levels`） | `config.providers[*].levels` |
+| 「同步模型清单」按钮 | 可用模型列表（`models`），并连带刷新等级 | `config.providers[*].models` + `levels` |
+
 
 **自动识别（只读，不改文件）**
 
@@ -221,9 +228,32 @@ DSH 的模型供应商由 `@deepseek-ai/dsh-llm-pi-ai` 的 `config.providers` �
   插件写出的 `off` 一定带引号。
 - 解锁写盘时留 `.bak-<时间戳>` 备份（保留最近 3 份），文件权限按 `0600` 写。
 
+**同步模型清单（独立按钮，先预览再写）**
+
+「全部解锁」只管档位、不管模型列表还能不能选；「同步模型清单」反过来只重写模型列表，并把等级一起刷新。
+两者分开是为了不让人在「解锁档位」时顺手把模型清单改空。
+
+- **先预览**：点按钮调 `POST /providers/models/sync-preview`（只读），返回
+  「将新增 N 个 / 将移除 M 个 / 保留 K 个」，并分别给出 `levels` 与 `models` 的
+  `added` / `removed` / `kept` 明细。预览阶段**不写文件**。
+- **再确认写入**：`POST /providers/models/sync-apply` 必须带预览摘要（每个供应商的 `digest`、
+  以及 `confirm: true`）；预览之后清单若变了（provider 换了模型、别人刚改过 patch），服务端返回
+  `409 error.provider.sync.stale` 要求**重新预览**，不会盲写。
+- **一次写两样**：确认后同一次写入既刷新思考强度等级、又刷新可用模型列表，两者**同批生效**，
+  不会出现「等级更新了但模型列表还是旧的」这种半截状态。
+- **抓取失败就报错，绝不清空**：某个网关连不上或 `/models` 报错时该供应商单独标红；网关返回空
+  模型清单时直接 `502 error.provider.sync.empty` 拒绝写入——**任何情况下都不会把模型清单写空**；
+  所有网关都探测失败时整体 `502`，一个字节都不落盘。
+- **原子写盘 + 备份**：改动走 `writeFileAtomic`（`writeWithBackup`，保留最近 3 份 `.bak-<时间戳>`），
+  写前做 YAML 结构校验，写后重新解析核对。
+- **和「定时更新」同一个调度**：到点时调度器跑的就是这条路径（`source: "schedule"`，自动确认），
+  并把差异摘要记进 `unlock-schedule.json` 的 `lastResult.sync`（新增/移除多少个模型、涉及的模型 id、
+  等级变化、失败网关），页面显示「上次同步：+3 / -1」这类摘要。
+
 **定时更新**
 
-不用每次打开本页点「全部解锁」：DSH 运行期间，插件自己按周期做同一件事。
+不用每次打开本页点「全部解锁」或「同步模型清单」：DSH 运行期间，插件自己按周期把**两件事都做一遍**
+——解锁思考档位 + 同步可用模型清单（定时路径自动确认，不弹确认，但会记日志并在页面提示上次差异摘要）。
 
 - **默认每 6 小时跑一次**，页面上可改成 15 分钟 / 30 分钟 / 1 / 2 / 6 / 12 / 24 小时，也可以直接关掉。
   改周期、或把已关掉的开关重新打开，都会**从现在重新计时**。
@@ -246,9 +276,10 @@ DSH 的模型供应商由 `@deepseek-ai/dsh-llm-pi-ai` 的 `config.providers` �
 **本页不做什么**
 
 - **不新增、不编辑、不删除供应商，也不写密钥**：供应商的新增/编辑走下面的「新增 / 编辑网关」，
-  本页的路由只有 `GET /provider/list`（只读状态）、`POST /provider/unlock`（解锁写入）与
-  `GET|POST /provider/schedule`、`POST /provider/schedule/run`（定时更新的读写与立即执行）。
-- 没有待解锁项时不会有任何写入动作。
+  本页的路由只有 `GET /provider/list`（只读状态）、`POST /provider/unlock`（解锁写入）、
+  `GET|POST /provider/schedule`、`POST /provider/schedule/run`（定时更新的读写与立即执行），
+  以及 `POST /providers/models/sync-preview` / `POST /providers/models/sync-apply`（模型清单的预览与写入）。
+- 没有待解锁项、也没有清单差异时不会有任何写入动作。
 
 解锁后需**重启 DSH** 才会在模型选择器里看到新档位；重启前可用 `de_models` 核对每个模型是否带上了
 「思考等级」。
